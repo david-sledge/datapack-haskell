@@ -1,0 +1,34 @@
+name:                DataPack
+version:             0.1.0.0
+synopsis:            A Haskell implementation of DataPack
+description:         A Haskell implementation of DataPack
+homepage:            https://github.com/githubuser/DataPack#readme
+license:             BSD3
+license-file:        LICENSE
+author:              David M. Sledge
+maintainer:          David M. Sledge <<last name><first initial><at>gmail<period>com>
+copyright:           2017 David M. Sledge
+category:            Data
+stability:           experimental
+build-type:          Simple
+extra-source-files:  README.md
+cabal-version:       >=1.10
+
+library
+  hs-source-dirs:      src
+  exposed-modules:     Lib
+  build-depends:       base >= 4.7 && < 5, mtl == 2.2.1, transformers == 0.5.5.0
+  default-language:    Haskell2010
+
+test-suite DataPack-test
+  type:                exitcode-stdio-1.0
+  hs-source-dirs:      test
+  main-is:             Spec.hs
+  build-depends:       base
+                     , DataPack
+  ghc-options:         -threaded -rtsopts -with-rtsopts=-N
+  default-language:    Haskell2010
+
+source-repository head
+  type:     git
+  location: https://github.com/githubuser/DataPack
