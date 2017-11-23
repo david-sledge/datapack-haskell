@@ -18,13 +18,15 @@
 
 module Data.DataPack.Get where
 
-import  Data.Word
-import  Data.Bits
-import  Data.Int
+import Data.Word
+import Data.Bits
+import Data.Int
 
-import  Control.Monad.Trans.Except
-import  Control.Monad.Trans.State
-import  Control.Monad.Identity
+import Control.Monad.Trans.Class
+import Control.Monad.Trans.Except
+import Control.Monad.Trans.State
+import Control.Monad.Identity
+import Data.Binary.IEEE754
 
 fixintMask  = 0xc0::Word8
 nilByte     = 0x40::Word8
@@ -120,75 +122,85 @@ idFormat byte
             | mask == fixnsMask -> Fixns len
           _ -> FUnused
 
-to16Bit (b1, b2) = ((fromIntegral b1::Word16) `shiftL` 8) .|. fromIntegral b2
-
-to32Bit (b1, b2, b3, b4) = ((fromIntegral (to16Bit (b1, b2))::Word32) `shiftL` 16)
-  .|. fromIntegral (to16Bit (b3, b4))
-
-to64Bit (b1, b2, b3, b4, b5, b6, b7, b8) =
-  ((fromIntegral (to32Bit (b1, b2, b3, b4))::Word64) `shiftL` 32)
-  .|. fromIntegral (to32Bit (b5, b6, b7, b8))
-
 --------------------------------------------------------------------------------
 
 class (Monad m) => ByteStream s m where
     uncons :: s -> m (Word8, s)
 
 data PackType = Int Int
+  | UInt Word64
   | Nil
   | Bool Bool
+  | Float Float
+  | Double Double
 
-data FormatException s = Unused s
+data FormatException = Unused
 
-data Exception s e = FormatException (FormatException s)
+data Exception e c = FormatException FormatException
   | ByteStreamException e
---
--- --hmmm :: ByteStream s m => s -> m (ExceptT FormatError m2 PackType)
--- --Just (Right $ Int x, s')
--- hmmm s = do
---   (byte, s') <- uncons s
---   pure (case idFormat byte of
---     Fixint x -> ExceptT . pure . Right $ Int x
---     FNil -> ExceptT . pure $ Right Nil
---     --ColEnd -> TODO
---     FBool b -> ExceptT . pure . Right $ Bool b
---     --UInt8 | UInt16 | UInt32 | UInt64
---     --Int8 | Int16 | Int32 | Int64
---     --Float32 | Float64
---     --Bin8 | Bin16 | Bin32
---     --Str8 | Str16 | Str32
---     --Ns8 | Ns16 | Ns32
---     --Classname
---     --Array
---     --Map
---     --Obj
---     --Fixbin Int | Fixstr Int | Fixns Int
---     FUnused -> throwError Unused, s')
---
--- hmmm2 s =
---   case uncons s of
---     Nothing -> Nothing
---     Just (byte, s') ->
---       case idFormat byte of
---         Fixint x -> Just (Right $ Int x, s')
---         FUnused -> Just (Left Unused, s')
+  | CallbackException c
 
-hmmm3 s =
+catchS f = do
+  s <- get
   case uncons s of
-    Just (byte, s') ->
-      case idFormat byte of
-        Fixint x -> pure (Int x, s')
-        FUnused -> throwE . FormatException $ Unused s'
-    e -> throwE $ ByteStreamException e
+    Right (byte, s') -> put s' *> f byte
+    Left e -> lift . throwE $ ByteStreamException e
 
-hmmm4 s = do
-  (byte, s') <- uncons s
-  case idFormat byte of
-    Fixint x -> pure (Int x, s')
-    FUnused -> throwE . FormatException $ Unused s'
+read8S :: (Monad m, ByteStream s (Either e)) =>
+  StateT s (ExceptT (Exception e c) m) Word8
+read8S = do
+  s <- get
+  case uncons s of
+    Right (byte, s') -> do
+      put s'
+      pure byte
+    Left e -> lift . throwE $ ByteStreamException e
 
-hmmm5 = StateT hmmm4
---}
+readBytesS n =
+  if n > 0
+  then do
+    let n' = n - 1
+    byte <- read8S
+    (fromIntegral byte `shiftL` (n' * 8) .|.) <$> readBytesS n'
+  else pure (0::Word64)
+
+readData :: (Monad m, ByteStream s (Either e)) =>
+  StateT s (ExceptT (Exception e c) m) PackType
+readData =
+  catchS $ \byte ->
+    case idFormat byte of
+      Fixint x -> pure (Int x)
+      FNil -> pure Nil
+      --ColEnd -> TODO
+      FBool b -> pure (Bool b)
+      UInt8 -> Int . fromIntegral <$> read8S
+      UInt16 -> Int . fromIntegral <$> readBytesS 2
+      UInt32 -> Int . fromIntegral <$> readBytesS 4
+      UInt64 -> UInt <$> readBytesS 8
+      Int8 -> do
+        byte <- read8S
+        pure . Int $ fromIntegral (fromIntegral byte :: Int8)
+      Int16 -> do
+        word <- readBytesS 2
+        pure . Int $ fromIntegral (fromIntegral word :: Int16)
+      Int32 -> do
+        word <- readBytesS 4
+        pure . Int $ fromIntegral (fromIntegral word :: Int32)
+      Int64 -> do
+        word <- readBytesS 8
+        pure . Int $ fromIntegral (fromIntegral word :: Int64)
+      Float32 -> Float . wordToFloat . fromIntegral <$> readBytesS 4
+      Float64 -> Double . wordToDouble <$> readBytesS 8
+      --Bin8 | Bin16 | Bin32
+      --Str8 | Str16 | Str32
+      --Ns8 | Ns16 | Ns32
+      --Classname
+      --Array
+      --Map
+      --Obj
+      --Fixbin Int | Fixstr Int | Fixns Int
+      FUnused -> lift . throwE $ FormatException Unused
+
   {-
 getInt :: Get Int
 getInt =
