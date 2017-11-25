@@ -22,15 +22,17 @@ import Data.Word
 import Data.Bits
 import Data.Int
 
+import Control.Exception.Safe
+import Control.Monad.Identity
 import Control.Monad.Trans.Class
 import Control.Monad.Trans.Except
 import Control.Monad.Trans.State
-import Control.Monad.Identity
 import Data.Binary.IEEE754
+import Data.Typeable
 
 fixintMask  = 0xc0::Word8
 nilByte     = 0x40::Word8
-colEnd      = 0x41::Word8
+colEndByte  = 0x41::Word8
 falseByte   = 0x42::Word8
 trueByte    = 0x43::Word8
 uint8Byte   = 0x44::Word8
@@ -88,7 +90,7 @@ idFormat byte
   | byte .&. fixintMask == fixintMask =
     Fixint $ fromIntegral (fromIntegral byte :: Int8)
   | byte == nilByte     = FNil
-  | byte == colEnd      = ColEnd
+  | byte == colEndByte  = ColEnd
   | byte == falseByte   = FBool False
   | byte == trueByte    = FBool True
   | byte == uint8Byte   = UInt8
@@ -123,181 +125,88 @@ idFormat byte
           _ -> FUnused
 
 --------------------------------------------------------------------------------
+-- TODO: implement MonadThrow to replace ExceptT
 
 class (Monad m) => ByteStream s m where
     uncons :: s -> m (Word8, s)
-
-data PackType = Int Int
-  | UInt Word64
-  | Nil
-  | Bool Bool
-  | Float Float
-  | Double Double
+    unconsS :: StateT s m Word8
+    unconsS = StateT uncons
 
 data FormatException = Unused
+  deriving (Show, Typeable)
 
-data Exception e c = FormatException FormatException
-  | ByteStreamException e
-  | CallbackException c
+instance Exception FormatException where
+  displayException Unused = "Unused byte format"
 
-catchS f = do
-  s <- get
-  case uncons s of
-    Right (byte, s') -> put s' *> f byte
-    Left e -> lift . throwE $ ByteStreamException e
+data DPException = FormatException FormatException
+  | ByteStreamException SomeException
+  | CallbackException SomeException
+  deriving (Show, Typeable)
 
-read8S :: (Monad m, ByteStream s (Either e)) =>
-  StateT s (ExceptT (Exception e c) m) Word8
-read8S = do
-  s <- get
-  case uncons s of
-    Right (byte, s') -> do
-      put s'
-      pure byte
-    Left e -> lift . throwE $ ByteStreamException e
+instance Exception DPException --where
+--   displayException (FormatException e) = displayException e
+--   displayException (ByteStreamException e) = displayException e
+--   displayException (CallbackException e) = displayException e
 
-readBytesS n =
+-- data PackType = Int Int
+--   | UInt Word64
+--   | Nil
+--   | Bool Bool
+--   | Float Float
+--   | Double Double
+
+readBytesSE n =
   if n > 0
   then do
     let n' = n - 1
-    byte <- read8S
-    (fromIntegral byte `shiftL` (n' * 8) .|.) <$> readBytesS n'
+    byte <- catch (lift unconsS) $ throwM . ByteStreamException
+    (fromIntegral byte `shiftL` (n' * 8) .|.) <$> readBytesSE n'
   else pure (0::Word64)
 
-readData :: (Monad m, ByteStream s (Either e)) =>
-  StateT s (ExceptT (Exception e c) m) PackType
-readData =
-  catchS $ \byte ->
-    case idFormat byte of
-      Fixint x -> pure (Int x)
-      FNil -> pure Nil
-      --ColEnd -> TODO
-      FBool b -> pure (Bool b)
-      UInt8 -> Int . fromIntegral <$> read8S
-      UInt16 -> Int . fromIntegral <$> readBytesS 2
-      UInt32 -> Int . fromIntegral <$> readBytesS 4
-      UInt64 -> UInt <$> readBytesS 8
-      Int8 -> do
-        byte <- read8S
-        pure . Int $ fromIntegral (fromIntegral byte :: Int8)
-      Int16 -> do
-        word <- readBytesS 2
-        pure . Int $ fromIntegral (fromIntegral word :: Int16)
-      Int32 -> do
-        word <- readBytesS 4
-        pure . Int $ fromIntegral (fromIntegral word :: Int32)
-      Int64 -> do
-        word <- readBytesS 8
-        pure . Int $ fromIntegral (fromIntegral word :: Int64)
-      Float32 -> Float . wordToFloat . fromIntegral <$> readBytesS 4
-      Float64 -> Double . wordToDouble <$> readBytesS 8
-      --Bin8 | Bin16 | Bin32
-      --Str8 | Str16 | Str32
-      --Ns8 | Ns16 | Ns32
-      --Classname
-      --Array
-      --Map
-      --Obj
-      --Fixbin Int | Fixstr Int | Fixns Int
-      FUnused -> lift . throwE $ FormatException Unused
+data PackHandler s m = PackHandler
+  { int :: Int -> StateT (PackHandler s m) (StateT s m) ()
+  , uInt :: Word64 -> StateT (PackHandler s m) (StateT s m) ()
+  , colEnd :: StateT (PackHandler s m) (StateT s m) ()
+  , nil :: StateT (PackHandler s m) (StateT s m) ()
+  , bool :: Bool -> StateT (PackHandler s m) (StateT s m) ()
+  , float :: Float -> StateT (PackHandler s m) (StateT s m) ()
+  , double :: Double -> StateT (PackHandler s m) (StateT s m) ()
+  }
 
-  {-
-getInt :: Get Int
-getInt =
-  getWord8 >>= \case
-    -- positive fixint
-    c | c .&. fixintMask == 0x00 ->
-        return $ fromIntegral c
-    -- negative fixint
-      | c .&. fixintMask == 0xC0 ->
-        return $ fromIntegral (fromIntegral c :: Int8)
-    uint8Byte -> fromIntegral <$> getWord8
-    uint16Byte -> fromIntegral <$> getWord16be
-    uint32Byte -> fromIntegral <$> getWord32be
-    uint64Byte -> fromIntegral <$> getWord64be
-    int8Byte -> fromIntegral <$> getInt8
-    int16Byte -> fromIntegral <$> getInt16be
-    int32Byte -> fromIntegral <$> getInt32be
-    int64Byte -> fromIntegral <$> getInt64be
-    _    -> empty
-
-getFloat :: Get Float
-getFloat = tag float32Byte >> getFloat32be
-
-getDouble :: Get Double
-getDouble = tag float64Byte >> getFloat64be
-
-getStr :: Get T.Text
-getStr = do
-  len <- getWord8 >>= \case
-    t | t .&. 0xE0 == 0xA0 ->
-      return $ fromIntegral $ t .&. 0x1F
-    0xD9 -> fromIntegral <$> getWord8
-    0xDA -> fromIntegral <$> getWord16be
-    0xDB -> fromIntegral <$> getWord32be
-    _    -> empty
-  bs <- getByteString len
-  case T.decodeUtf8' bs of
-    Left _ -> empty
-    Right v -> return v
-
-getBin :: Get S.ByteString
-getBin = do
-  len <- getWord8 >>= \case
-    0xC4 -> fromIntegral <$> getWord8
-    0xC5 -> fromIntegral <$> getWord16be
-    0xC6 -> fromIntegral <$> getWord32be
-    _    -> empty
-  getByteString len
-
-getArray :: Get a -> Get (V.Vector a)
-getArray g = do
-  len <- getWord8 >>= \case
-    t | t .&. 0xF0 == 0x90 ->
-      return $ fromIntegral $ t .&. 0x0F
-    0xDC -> fromIntegral <$> getWord16be
-    0xDD -> fromIntegral <$> getWord32be
-    _    -> empty
-  V.replicateM len g
-
-getMap :: Get a -> Get b -> Get (V.Vector (a, b))
-getMap k v = do
-  len <- getWord8 >>= \case
-    t | t .&. 0xF0 == 0x80 ->
-      return $ fromIntegral $ t .&. 0x0F
-    0xDE -> fromIntegral <$> getWord16be
-    0xDF -> fromIntegral <$> getWord32be
-    _    -> empty
-  V.replicateM len $ (,) <$> k <*> v
-
-getExt :: Get (Word8, S.ByteString)
-getExt = do
-  len <- getWord8 >>= \case
-    0xD4 -> return 1
-    0xD5 -> return 2
-    0xD6 -> return 4
-    0xD7 -> return 8
-    0xD8 -> return 16
-    0xC7 -> fromIntegral <$> getWord8
-    0xC8 -> fromIntegral <$> getWord16be
-    0xC9 -> fromIntegral <$> getWord32be
-    _ -> empty
-  (,) <$> getWord8 <*> getByteString len
-
-getInt8 :: Get Int8
-getInt8 = fromIntegral <$> getWord8
-
-getInt16be :: Get Int16
-getInt16be = fromIntegral <$> getWord16be
-
-getInt32be :: Get Int32
-getInt32be = fromIntegral <$> getWord32be
-
-getInt64be :: Get Int64
-getInt64be = fromIntegral <$> getWord64be
-
-tag :: Word8 -> Get ()
-tag t = do
-  b <- getWord8
-  guard $ t == b
--}
+readDataE :: (MonadThrow m, MonadCatch m, ByteStream s m) =>
+  StateT (PackHandler s m) (StateT s m) ()
+readDataE = do
+  byte <- catch (lift unconsS) $ throwM . ByteStreamException
+  pHandler <- get
+  case idFormat byte of
+    Fixint x -> int pHandler x
+    FNil -> nil pHandler
+    ColEnd -> colEnd pHandler
+    FBool b -> bool pHandler b
+    UInt8 -> readBytesSE 1 >>= int pHandler . fromIntegral
+    UInt16 -> readBytesSE 2 >>= int pHandler . fromIntegral
+    UInt32 -> readBytesSE 4 >>= int pHandler . fromIntegral
+    UInt64 -> readBytesSE 8 >>= uInt pHandler
+    Int8 -> do
+      byte <- readBytesSE 1
+      int pHandler $ fromIntegral (fromIntegral byte :: Int8)
+    Int16 -> do
+      word <- readBytesSE 2
+      int pHandler $ fromIntegral (fromIntegral word :: Int16)
+    Int32 -> do
+      word <- readBytesSE 4
+      int pHandler $ fromIntegral (fromIntegral word :: Int32)
+    Int64 -> do
+      word <- readBytesSE 8
+      int pHandler $ fromIntegral (fromIntegral word :: Int64)
+    Float32 -> readBytesSE 4 >>= float pHandler . wordToFloat . fromIntegral
+    Float64 -> readBytesSE 8 >>= double pHandler . wordToDouble
+    --Bin8 | Bin16 | Bin32
+    --Str8 | Str16 | Str32
+    --Ns8 | Ns16 | Ns32
+    --Classname
+    --Array
+    --Map
+    --Obj
+    --Fixbin Int | Fixstr Int | Fixns Int
+    FUnused -> throwM $ FormatException Unused
