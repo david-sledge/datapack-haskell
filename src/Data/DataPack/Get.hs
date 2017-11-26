@@ -18,68 +18,38 @@
 
 module Data.DataPack.Get where
 
-import Data.Word
-import Data.Bits
-import Data.Int
-
+import Prelude hiding (head, length, take)
 import Control.Exception.Safe
 import Control.Monad.Identity
 import Control.Monad.Trans.Class
 import Control.Monad.Trans.Except
 import Control.Monad.Trans.State
 import Data.Binary.IEEE754
+import Data.Bits
+import Data.ByteString hiding (take, uncons)
+import Data.Int
+import Data.Text hiding (take, empty, append, length, head, uncons)
+import Data.Text.Encoding
 import Data.Typeable
+import Data.Word
 
-fixintMask  = 0xc0::Word8
-nilByte     = 0x40::Word8
-colEndByte  = 0x41::Word8
-falseByte   = 0x42::Word8
-trueByte    = 0x43::Word8
-uint8Byte   = 0x44::Word8
-uint16Byte  = 0x45::Word8
-uint32Byte  = 0x46::Word8
-uint64Byte  = 0x47::Word8
-int8Byte    = 0x48::Word8
-int16Byte   = 0x49::Word8
-int32Byte   = 0x4a::Word8
-int64Byte   = 0x4b::Word8
-float32Byte = 0x4c::Word8
-float64Byte = 0x4d::Word8
-bin8Byte    = 0x4e::Word8
-bin16Byte   = 0x4f::Word8
-bin32Byte   = 0x50::Word8
-str8Byte    = 0x51::Word8
-str16Byte   = 0x52::Word8
-str32Byte   = 0x53::Word8
-ns8Byte     = 0x54::Word8
-ns16Byte    = 0x55::Word8
-ns32Byte    = 0x56::Word8
-cnameByte   = 0x57::Word8
-arrayByte   = 0x58::Word8
-objByte     = 0x59::Word8
-mapByte     = 0x5a::Word8
---unusedBytes = [0x5b..0x5f]
-fixbinMask  = 0x60::Word8
-fixstrMask  = 0x80::Word8
-fixnsMask   = 0xa0::Word8
-fixMask     = 0xe0::Word8
-lenMask     = 0x1f::Word8
+import Data.DataPack
 
 data Format = Fixint Int
   | FNil
-  | ColEnd
+  | FColEnd
   | FBool Bool
-  | UInt8 | UInt16 | UInt32 | UInt64
-  | Int8 | Int16 | Int32 | Int64
-  | Float32 | Float64
-  | Bin8 | Bin16 | Bin32
-  | Str8 | Str16 | Str32
-  | Ns8 | Ns16 | Ns32
-  | Classname
-  | Array
-  | Map
-  | Obj
-  | Fixbin Int | Fixstr Int | Fixns Int
+  | FUInt8 | FUInt16 | FUInt32 | FUInt64
+  | FInt8 | FInt16 | FInt32 | FInt64
+  | FFloat32 | FFloat64
+  | FBin8 | FBin16 | FBin32
+  | FStr8 | FStr16 | FStr32
+  | FNs8 | FNs16 | FNs32
+  | FClassname
+  | FArray
+  | FMap
+  | FObj
+  | FFixbin Int | FFixstr Int | FFixns Int
   | FUnused
   deriving (Show)
 
@@ -90,47 +60,53 @@ idFormat byte
   | byte .&. fixintMask == fixintMask =
     Fixint $ fromIntegral (fromIntegral byte :: Int8)
   | byte == nilByte     = FNil
-  | byte == colEndByte  = ColEnd
+  | byte == colEndByte  = FColEnd
   | byte == falseByte   = FBool False
   | byte == trueByte    = FBool True
-  | byte == uint8Byte   = UInt8
-  | byte == uint16Byte  = UInt16
-  | byte == uint32Byte  = UInt32
-  | byte == uint64Byte  = UInt64
-  | byte == int8Byte    = Int8
-  | byte == int16Byte   = Int16
-  | byte == int32Byte   = Int32
-  | byte == int64Byte   = Int64
-  | byte == float32Byte = Float32
-  | byte == float64Byte = Float64
-  | byte == bin8Byte    = Bin8
-  | byte == bin16Byte   = Bin16
-  | byte == bin32Byte   = Bin32
-  | byte == str8Byte    = Str8
-  | byte == str16Byte   = Str16
-  | byte == str32Byte   = Str32
-  | byte == ns8Byte     = Ns8
-  | byte == ns16Byte    = Ns16
-  | byte == ns32Byte    = Ns32
-  | byte == cnameByte   = Classname
-  | byte == arrayByte   = Array
-  | byte == objByte     = Obj
-  | byte == mapByte     = Map
+  | byte == uint8Byte   = FUInt8
+  | byte == uint16Byte  = FUInt16
+  | byte == uint32Byte  = FUInt32
+  | byte == uint64Byte  = FUInt64
+  | byte == int8Byte    = FInt8
+  | byte == int16Byte   = FInt16
+  | byte == int32Byte   = FInt32
+  | byte == int64Byte   = FInt64
+  | byte == float32Byte = FFloat32
+  | byte == float64Byte = FFloat64
+  | byte == bin8Byte    = FBin8
+  | byte == bin16Byte   = FBin16
+  | byte == bin32Byte   = FBin32
+  | byte == str8Byte    = FStr8
+  | byte == str16Byte   = FStr16
+  | byte == str32Byte   = FStr32
+  | byte == ns8Byte     = FNs8
+  | byte == ns16Byte    = FNs16
+  | byte == ns32Byte    = FNs32
+  | byte == cnameByte   = FClassname
+  | byte == arrayByte   = FArray
+  | byte == objByte     = FObj
+  | byte == mapByte     = FMap
   | otherwise = let len = fromIntegral $ byte .&. lenMask in
         case byte .&. fixMask of
           mask
-            | mask == fixbinMask -> Fixbin len
-            | mask == fixstrMask -> Fixstr len
-            | mask == fixnsMask -> Fixns len
+            | mask == fixbinMask -> FFixbin len
+            | mask == fixstrMask -> FFixstr len
+            | mask == fixnsMask -> FFixns len
           _ -> FUnused
 
 --------------------------------------------------------------------------------
 -- TODO: implement MonadThrow to replace ExceptT
 
 class (Monad m) => ByteStream s m where
-    uncons :: s -> m (Word8, s)
-    unconsS :: StateT s m Word8
-    unconsS = StateT uncons
+  take :: Int -> s -> m (ByteString, s)
+  takeS :: Int -> StateT s m ByteString
+  takeS x = StateT $ take x
+  uncons :: s -> m (Word8, s)
+  uncons s = do
+    (byteString, s') <- take 1 s
+    pure (head byteString, s')
+  unconsS :: StateT s m Word8
+  unconsS = StateT uncons
 
 data FormatException = Unused
   deriving (Show, Typeable)
@@ -147,13 +123,6 @@ instance Exception DPException --where
 --   displayException (FormatException e) = displayException e
 --   displayException (ByteStreamException e) = displayException e
 --   displayException (CallbackException e) = displayException e
-
--- data PackType = Int Int
---   | UInt Word64
---   | Nil
---   | Bool Bool
---   | Float Float
---   | Double Double
 
 readBytesSE n =
   if n > 0
@@ -181,29 +150,129 @@ readDataE = do
   case idFormat byte of
     Fixint x -> int pHandler x
     FNil -> nil pHandler
-    ColEnd -> colEnd pHandler
+    FColEnd -> colEnd pHandler
     FBool b -> bool pHandler b
-    UInt8 -> readBytesSE 1 >>= int pHandler . fromIntegral
-    UInt16 -> readBytesSE 2 >>= int pHandler . fromIntegral
-    UInt32 -> readBytesSE 4 >>= int pHandler . fromIntegral
-    UInt64 -> readBytesSE 8 >>= uInt pHandler
-    Int8 -> do
+    FUInt8 -> readBytesSE 1 >>= int pHandler . fromIntegral
+    FUInt16 -> readBytesSE 2 >>= int pHandler . fromIntegral
+    FUInt32 -> readBytesSE 4 >>= int pHandler . fromIntegral
+    FUInt64 -> readBytesSE 8 >>= uInt pHandler
+    FInt8 -> do
       byte <- readBytesSE 1
       int pHandler $ fromIntegral (fromIntegral byte :: Int8)
-    Int16 -> do
+    FInt16 -> do
       word <- readBytesSE 2
       int pHandler $ fromIntegral (fromIntegral word :: Int16)
-    Int32 -> do
+    FInt32 -> do
       word <- readBytesSE 4
       int pHandler $ fromIntegral (fromIntegral word :: Int32)
-    Int64 -> do
+    FInt64 -> do
       word <- readBytesSE 8
       int pHandler $ fromIntegral (fromIntegral word :: Int64)
-    Float32 -> readBytesSE 4 >>= float pHandler . wordToFloat . fromIntegral
-    Float64 -> readBytesSE 8 >>= double pHandler . wordToDouble
+    FFloat32 -> readBytesSE 4 >>= float pHandler . wordToFloat . fromIntegral
+    FFloat64 -> readBytesSE 8 >>= double pHandler . wordToDouble
     --Bin8 | Bin16 | Bin32
     --Str8 | Str16 | Str32
     --Ns8 | Ns16 | Ns32
+    --Classname
+    --Array
+    --Map
+    --Obj
+    --Fixbin Int | Fixstr Int | Fixns Int
+    FUnused -> throwM $ FormatException Unused
+
+readBytes n =
+  if n > 0
+  then do
+    let n' = n - 1
+    byte <- catch (lift unconsS) $ throwM . ByteStreamException
+    (fromIntegral byte `shiftL` (n' * 8) .|.) <$> readBytes n'
+  else pure (0::Word64)
+
+data PackType = Int Int
+  | UInt Word64
+  | Nil
+  | ColEnd
+  | Bool Bool
+  | Float Float
+  | Double Double
+  | Bin ByteString
+  | Str Text
+  | NS Text
+
+data StateStack = Array
+  | Map
+  | Obj
+  | ColInit
+  | EntryValue
+  | LocalName
+
+--readString :: Int -> ByteString -> StateT [StateStack] (StateT s m) ByteString
+readString n byteString =
+  let len = length byteString in
+  if len < n
+  then do
+    suffix <- lift $ takeS (n - len)
+    readString n $ append byteString suffix
+  else pure byteString
+
+--valueEnd :: StateT [StateStack] (StateT s m) ()
+--valueEnd =
+
+readValue :: (MonadThrow m, MonadCatch m, ByteStream s m) =>
+  StateT [StateStack] (StateT s m) PackType
+readValue = do
+  byte <- catch (lift unconsS) $ throwM . ByteStreamException
+  pHandler <- get
+  case idFormat byte of
+    Fixint x -> pure $ Int x
+    FNil -> pure Nil
+    FColEnd -> pure ColEnd
+    FBool b -> pure $ Bool b
+    FUInt8 -> Int . fromIntegral <$> readBytes 1
+    FUInt16 -> Int . fromIntegral <$> readBytes 2
+    FUInt32 -> Int . fromIntegral <$> readBytes 4
+    FUInt64 -> UInt <$> readBytes 8
+    FInt8 -> do
+      byte <- readBytes 1
+      pure . Int $ fromIntegral (fromIntegral byte :: Int8)
+    FInt16 -> do
+      word <- readBytes 2
+      pure . Int $ fromIntegral (fromIntegral word :: Int16)
+    FInt32 -> do
+      word <- readBytes 4
+      pure . Int $ fromIntegral (fromIntegral word :: Int32)
+    FInt64 -> do
+      word <- readBytes 8
+      pure . Int $ fromIntegral (fromIntegral word :: Int64)
+    FFloat32 -> Float . wordToFloat . fromIntegral <$> readBytes 4
+    FFloat64 -> Double . wordToDouble <$> readBytes 8
+    FBin8 -> do
+      len <- fromIntegral <$> readBytes 1
+      Bin <$> readString len empty
+    FBin16 -> do
+      len <- fromIntegral <$> readBytes 2
+      Bin <$> readString len empty
+    FBin32 -> do
+      len <- fromIntegral <$> readBytes 4
+      Bin <$> readString len empty
+    FStr8 -> do
+      len <- fromIntegral <$> readBytes 1
+      Str . decodeUtf8 <$> readString len empty
+    FStr16 -> do
+      len <- fromIntegral <$> readBytes 2
+      Str . decodeUtf8 <$> readString len empty
+    FStr32 -> do
+      len <- fromIntegral <$> readBytes 4
+      Str . decodeUtf8 <$> readString len empty
+    FNs8 -> do
+      len <- fromIntegral <$> readBytes 1
+      NS . decodeUtf8 <$> readString len empty
+    FNs16 -> do
+      len <- fromIntegral <$> readBytes 2
+      NS . decodeUtf8 <$> readString len empty
+    FNs32 -> do
+      len <- fromIntegral <$> readBytes 4
+      NS . decodeUtf8 <$> readString len empty
     --Classname
     --Array
     --Map
