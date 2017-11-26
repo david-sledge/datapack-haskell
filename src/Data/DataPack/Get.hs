@@ -27,6 +27,7 @@ import Control.Monad.Trans.State
 import Data.Binary.IEEE754
 import Data.Bits
 import Data.ByteString hiding (take, uncons)
+import Data.Functor
 import Data.Int
 import Data.Text hiding (take, empty, append, length, head, uncons)
 import Data.Text.Encoding
@@ -95,7 +96,6 @@ idFormat byte
           _ -> FUnused
 
 --------------------------------------------------------------------------------
--- TODO: implement MonadThrow to replace ExceptT
 
 class (Monad m) => ByteStream s m where
   take :: Int -> s -> m (ByteString, s)
@@ -108,11 +108,20 @@ class (Monad m) => ByteStream s m where
   unconsS :: StateT s m Word8
   unconsS = StateT uncons
 
-data FormatException = Unused
+data FormatException =
+    Unused
+  | QualifiedNameException
+  | InvalidStateException
+  | LocalNameException
+  | ClassnameNotAllowedException
   deriving (Show, Typeable)
 
 instance Exception FormatException where
   displayException Unused = "Unused byte format"
+  displayException QualifiedNameException = "namespace or local name expected"
+  displayException InvalidStateException = "invalid state"
+  displayException LocalNameException = "local name expected"
+  displayException ClassnameNotAllowedException = "classname not allowed here"
 
 data DPException = FormatException FormatException
   | ByteStreamException SomeException
@@ -124,62 +133,63 @@ instance Exception DPException --where
 --   displayException (ByteStreamException e) = displayException e
 --   displayException (CallbackException e) = displayException e
 
-readBytesSE n =
-  if n > 0
-  then do
-    let n' = n - 1
-    byte <- catch (lift unconsS) $ throwM . ByteStreamException
-    (fromIntegral byte `shiftL` (n' * 8) .|.) <$> readBytesSE n'
-  else pure (0::Word64)
+-- readBytesSE n =
+--   if n > 0
+--   then do
+--     let n' = n - 1
+--     byte <- catch (lift unconsS) $ throwM . ByteStreamException
+--     (fromIntegral byte `shiftL` (n' * 8) .|.) <$> readBytesSE n'
+--   else pure (0::Word64)
+--
+-- data PackHandler s m = PackHandler
+--   { int :: Int -> StateT (PackHandler s m) (StateT s m) ()
+--   , uInt :: Word64 -> StateT (PackHandler s m) (StateT s m) ()
+--   , colEnd :: StateT (PackHandler s m) (StateT s m) ()
+--   , nil :: StateT (PackHandler s m) (StateT s m) ()
+--   , bool :: Bool -> StateT (PackHandler s m) (StateT s m) ()
+--   , float :: Float -> StateT (PackHandler s m) (StateT s m) ()
+--   , double :: Double -> StateT (PackHandler s m) (StateT s m) ()
+--   }
+--
+-- readDataE :: (MonadThrow m, MonadCatch m, ByteStream s m) =>
+--   StateT (PackHandler s m) (StateT s m) ()
+-- readDataE = do
+--   byte <- catch (lift unconsS) $ throwM . ByteStreamException
+--   pHandler <- get
+--   case idFormat byte of
+--     Fixint x -> int pHandler x
+--     FNil -> nil pHandler
+--     FColEnd -> colEnd pHandler
+--     FBool b -> bool pHandler b
+--     FUInt8 -> readBytesSE 1 >>= int pHandler . fromIntegral
+--     FUInt16 -> readBytesSE 2 >>= int pHandler . fromIntegral
+--     FUInt32 -> readBytesSE 4 >>= int pHandler . fromIntegral
+--     FUInt64 -> readBytesSE 8 >>= uInt pHandler
+--     FInt8 -> do
+--       byte <- readBytesSE 1
+--       int pHandler $ fromIntegral (fromIntegral byte :: Int8)
+--     FInt16 -> do
+--       word <- readBytesSE 2
+--       int pHandler $ fromIntegral (fromIntegral word :: Int16)
+--     FInt32 -> do
+--       word <- readBytesSE 4
+--       int pHandler $ fromIntegral (fromIntegral word :: Int32)
+--     FInt64 -> do
+--       word <- readBytesSE 8
+--       int pHandler $ fromIntegral (fromIntegral word :: Int64)
+--     FFloat32 -> readBytesSE 4 >>= float pHandler . wordToFloat . fromIntegral
+--     FFloat64 -> readBytesSE 8 >>= double pHandler . wordToDouble
+--     --Bin8 | Bin16 | Bin32
+--     --Str8 | Str16 | Str32
+--     --Ns8 | Ns16 | Ns32
+--     --Classname
+--     --Array
+--     --Map
+--     --Obj
+--     --Fixbin Int | Fixstr Int | Fixns Int
+--     FUnused -> throwM $ FormatException Unused
 
-data PackHandler s m = PackHandler
-  { int :: Int -> StateT (PackHandler s m) (StateT s m) ()
-  , uInt :: Word64 -> StateT (PackHandler s m) (StateT s m) ()
-  , colEnd :: StateT (PackHandler s m) (StateT s m) ()
-  , nil :: StateT (PackHandler s m) (StateT s m) ()
-  , bool :: Bool -> StateT (PackHandler s m) (StateT s m) ()
-  , float :: Float -> StateT (PackHandler s m) (StateT s m) ()
-  , double :: Double -> StateT (PackHandler s m) (StateT s m) ()
-  }
-
-readDataE :: (MonadThrow m, MonadCatch m, ByteStream s m) =>
-  StateT (PackHandler s m) (StateT s m) ()
-readDataE = do
-  byte <- catch (lift unconsS) $ throwM . ByteStreamException
-  pHandler <- get
-  case idFormat byte of
-    Fixint x -> int pHandler x
-    FNil -> nil pHandler
-    FColEnd -> colEnd pHandler
-    FBool b -> bool pHandler b
-    FUInt8 -> readBytesSE 1 >>= int pHandler . fromIntegral
-    FUInt16 -> readBytesSE 2 >>= int pHandler . fromIntegral
-    FUInt32 -> readBytesSE 4 >>= int pHandler . fromIntegral
-    FUInt64 -> readBytesSE 8 >>= uInt pHandler
-    FInt8 -> do
-      byte <- readBytesSE 1
-      int pHandler $ fromIntegral (fromIntegral byte :: Int8)
-    FInt16 -> do
-      word <- readBytesSE 2
-      int pHandler $ fromIntegral (fromIntegral word :: Int16)
-    FInt32 -> do
-      word <- readBytesSE 4
-      int pHandler $ fromIntegral (fromIntegral word :: Int32)
-    FInt64 -> do
-      word <- readBytesSE 8
-      int pHandler $ fromIntegral (fromIntegral word :: Int64)
-    FFloat32 -> readBytesSE 4 >>= float pHandler . wordToFloat . fromIntegral
-    FFloat64 -> readBytesSE 8 >>= double pHandler . wordToDouble
-    --Bin8 | Bin16 | Bin32
-    --Str8 | Str16 | Str32
-    --Ns8 | Ns16 | Ns32
-    --Classname
-    --Array
-    --Map
-    --Obj
-    --Fixbin Int | Fixstr Int | Fixns Int
-    FUnused -> throwM $ FormatException Unused
-
+-- read n bytes and OR them into a single n-byte word
 readBytes n =
   if n > 0
   then do
@@ -198,11 +208,16 @@ data PackType = Int Int
   | Bin ByteString
   | Str Text
   | NS Text
-
-data StateStack = Array
+  | Array
+  | Object
   | Map
+  | Classname
+
+data StateStack = Arr
+  | Mp
   | Obj
   | ColInit
+  | ClsNm
   | EntryValue
   | LocalName
 
@@ -215,8 +230,33 @@ readString n byteString =
     readString n $ append byteString suffix
   else pure byteString
 
+readStream len = readString len empty
+
 --valueEnd :: StateT [StateStack] (StateT s m) ()
 --valueEnd =
+
+validateNonText :: (MonadThrow m, MonadCatch m, ByteStream s m) =>
+ StateT [StateStack] (StateT s m) ()
+validateNonText = do
+  ss <- get
+  case ss of
+    [] -> pure ()
+    state:ss' ->
+      case state of
+        Arr -> pure ()
+        Mp -> pure ()
+        Obj -> throwM $ FormatException QualifiedNameException
+        ColInit ->
+          case ss' of
+            [] -> throwM $ FormatException InvalidStateException
+            state':ss'' ->
+              case state' of
+                Obj -> throwM $ FormatException QualifiedNameException
+                Arr -> put $ state:ss''
+                _ -> throwM $ FormatException InvalidStateException
+        ClsNm -> throwM $ FormatException QualifiedNameException
+        EntryValue -> pure ()
+        LocalName -> throwM $ FormatException LocalNameException
 
 readValue :: (MonadThrow m, MonadCatch m, ByteStream s m) =>
   StateT [StateStack] (StateT s m) PackType
@@ -224,58 +264,55 @@ readValue = do
   byte <- catch (lift unconsS) $ throwM . ByteStreamException
   pHandler <- get
   case idFormat byte of
-    Fixint x -> pure $ Int x
-    FNil -> pure Nil
-    FColEnd -> pure ColEnd
-    FBool b -> pure $ Bool b
-    FUInt8 -> Int . fromIntegral <$> readBytes 1
-    FUInt16 -> Int . fromIntegral <$> readBytes 2
-    FUInt32 -> Int . fromIntegral <$> readBytes 4
-    FUInt64 -> UInt <$> readBytes 8
+    Fixint x -> validateNonText $> Int x
+    FNil -> validateNonText $> Nil
+    FColEnd -> validateNonText $> ColEnd
+    FBool b -> validateNonText $> Bool b
+    FUInt8 -> validateNonText *> (Int . fromIntegral <$> readBytes 1)
+    FUInt16 -> validateNonText *> (Int . fromIntegral <$> readBytes 2)
+    FUInt32 -> validateNonText *> (Int . fromIntegral <$> readBytes 4)
+    FUInt64 -> validateNonText *> (UInt <$> readBytes 8)
     FInt8 -> do
+      validateNonText
       byte <- readBytes 1
       pure . Int $ fromIntegral (fromIntegral byte :: Int8)
     FInt16 -> do
+      validateNonText
       word <- readBytes 2
       pure . Int $ fromIntegral (fromIntegral word :: Int16)
     FInt32 -> do
+      validateNonText
       word <- readBytes 4
       pure . Int $ fromIntegral (fromIntegral word :: Int32)
     FInt64 -> do
+      validateNonText
       word <- readBytes 8
       pure . Int $ fromIntegral (fromIntegral word :: Int64)
-    FFloat32 -> Float . wordToFloat . fromIntegral <$> readBytes 4
-    FFloat64 -> Double . wordToDouble <$> readBytes 8
-    FBin8 -> do
-      len <- fromIntegral <$> readBytes 1
-      Bin <$> readString len empty
-    FBin16 -> do
-      len <- fromIntegral <$> readBytes 2
-      Bin <$> readString len empty
-    FBin32 -> do
-      len <- fromIntegral <$> readBytes 4
-      Bin <$> readString len empty
-    FStr8 -> do
-      len <- fromIntegral <$> readBytes 1
-      Str . decodeUtf8 <$> readString len empty
-    FStr16 -> do
-      len <- fromIntegral <$> readBytes 2
-      Str . decodeUtf8 <$> readString len empty
-    FStr32 -> do
-      len <- fromIntegral <$> readBytes 4
-      Str . decodeUtf8 <$> readString len empty
-    FNs8 -> do
-      len <- fromIntegral <$> readBytes 1
-      NS . decodeUtf8 <$> readString len empty
-    FNs16 -> do
-      len <- fromIntegral <$> readBytes 2
-      NS . decodeUtf8 <$> readString len empty
-    FNs32 -> do
-      len <- fromIntegral <$> readBytes 4
-      NS . decodeUtf8 <$> readString len empty
-    --Classname
-    --Array
-    --Map
-    --Obj
-    --Fixbin Int | Fixstr Int | Fixns Int
+    FFloat32 -> validateNonText *> (Float . wordToFloat . fromIntegral <$> readBytes 4)
+    FFloat64 -> validateNonText *> (Double . wordToDouble <$> readBytes 8)
+    FBin8 -> validateNonText *> (Bin <$> ((fromIntegral <$> readBytes 1) >>= readStream))
+    FBin16 -> validateNonText *> (Bin <$> ((fromIntegral <$> readBytes 2) >>= readStream))
+    FBin32 -> validateNonText *> (Bin <$> ((fromIntegral <$> readBytes 4) >>= readStream))
+    FStr8 -> Str . decodeUtf8 <$> ((fromIntegral <$> readBytes 1) >>= readStream)
+    FStr16 -> Str . decodeUtf8 <$> ((fromIntegral <$> readBytes 2) >>= readStream)
+    FStr32 -> Str . decodeUtf8 <$> ((fromIntegral <$> readBytes 4) >>= readStream)
+    FNs8 -> NS . decodeUtf8 <$> ((fromIntegral <$> readBytes 1) >>= readStream)
+    FNs16 -> NS . decodeUtf8 <$> ((fromIntegral <$> readBytes 2) >>= readStream)
+    FNs32 -> NS . decodeUtf8 <$> ((fromIntegral <$> readBytes 4) >>= readStream)
+    --{-
+    FClassname -> do
+      ss <- get
+      case ss of
+        [] -> throwM $ FormatException InvalidStateException
+        state:ss' ->
+          case state of
+            ColInit -> put (ClsNm:ss') $> Classname
+            _ -> throwM $ FormatException ClassnameNotAllowedException
+    --}
+    FArray -> validateNonText *> modify ((:) Arr . (:) ColInit) $> Array
+    FMap -> validateNonText *> modify ((:) Mp) $> Map
+    FObj -> validateNonText *> modify ((:) Obj . (:) ColInit) $> Object
+    FFixbin len -> validateNonText *> (Bin <$> readStream len)
+    FFixstr len -> Str . decodeUtf8 <$> readStream len
+    FFixns len -> NS . decodeUtf8 <$> readStream len
     FUnused -> throwM $ FormatException Unused
