@@ -27,7 +27,7 @@ test-suite DataPack-test
   hs-source-dirs:      test
   main-is:             Spec.hs
   build-depends:       base
-                     , DataPack
+                     , DataPack, HUnit >= 1.5.0.0
   ghc-options:         -threaded -rtsopts -with-rtsopts=-N
   default-language:    Haskell2010
 

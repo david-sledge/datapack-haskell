@@ -1,6 +1,5 @@
 --{-# LANGUAGE LambdaCase #-}
-{-# LANGUAGE MultiParamTypeClasses #-}
-{-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE MultiParamTypeClasses, FunctionalDependencies, FlexibleContexts #-}
 
 --------------------------------------------------------------------
 -- |
@@ -18,7 +17,7 @@
 
 module Data.DataPack.Get where
 
-import Prelude hiding (head, length, take)
+import Prelude hiding (take)
 import Control.Exception.Safe
 import Control.Monad.Identity
 import Control.Monad.Trans.Class
@@ -26,10 +25,10 @@ import Control.Monad.Trans.Except
 import Control.Monad.Trans.State
 import Data.Binary.IEEE754
 import Data.Bits
-import Data.ByteString hiding (take, uncons)
+import qualified Data.ByteString as C
 import Data.Functor
 import Data.Int
-import Data.Text hiding (take, empty, append, length, head, uncons)
+import qualified Data.Text as Text
 import Data.Text.Encoding
 import Data.Typeable
 import Data.Word
@@ -52,7 +51,7 @@ data Format = Fixint Int
   | FObj
   | FFixbin Int | FFixstr Int | FFixns Int
   | FUnused
-  deriving (Show)
+  deriving (Show, Eq, Ord)
 
 idFormat byte
   -- positive fixint
@@ -97,16 +96,17 @@ idFormat byte
 
 --------------------------------------------------------------------------------
 
-class (Monad m) => ByteStream s m where
-  take :: Int -> s -> m (ByteString, s)
-  takeS :: Int -> StateT s m ByteString
+class (Monad m, Show p) => Stream s m p | s -> p where
+  take :: Int -> s -> m (C.ByteString, s)
+  takeS :: Int -> StateT s m C.ByteString
   takeS x = StateT $ take x
   uncons :: s -> m (Word8, s)
   uncons s = do
     (byteString, s') <- take 1 s
-    pure (head byteString, s')
+    pure (C.head byteString, s')
   unconsS :: StateT s m Word8
   unconsS = StateT uncons
+  getPos :: s -> m p
 
 data FormatException =
     Unused
@@ -114,7 +114,7 @@ data FormatException =
   | InvalidStateException
   | LocalNameException
   | ClassnameNotAllowedException
-  deriving (Show, Typeable)
+  deriving (Show, Typeable, Eq, Ord)
 
 instance Exception FormatException where
   displayException Unused = "Unused byte format"
@@ -133,62 +133,6 @@ instance Exception DPException --where
 --   displayException (ByteStreamException e) = displayException e
 --   displayException (CallbackException e) = displayException e
 
--- readBytesSE n =
---   if n > 0
---   then do
---     let n' = n - 1
---     byte <- catch (lift unconsS) $ throwM . ByteStreamException
---     (fromIntegral byte `shiftL` (n' * 8) .|.) <$> readBytesSE n'
---   else pure (0::Word64)
---
--- data PackHandler s m = PackHandler
---   { int :: Int -> StateT (PackHandler s m) (StateT s m) ()
---   , uInt :: Word64 -> StateT (PackHandler s m) (StateT s m) ()
---   , colEnd :: StateT (PackHandler s m) (StateT s m) ()
---   , nil :: StateT (PackHandler s m) (StateT s m) ()
---   , bool :: Bool -> StateT (PackHandler s m) (StateT s m) ()
---   , float :: Float -> StateT (PackHandler s m) (StateT s m) ()
---   , double :: Double -> StateT (PackHandler s m) (StateT s m) ()
---   }
---
--- readDataE :: (MonadThrow m, MonadCatch m, ByteStream s m) =>
---   StateT (PackHandler s m) (StateT s m) ()
--- readDataE = do
---   byte <- catch (lift unconsS) $ throwM . ByteStreamException
---   pHandler <- get
---   case idFormat byte of
---     Fixint x -> int pHandler x
---     FNil -> nil pHandler
---     FColEnd -> colEnd pHandler
---     FBool b -> bool pHandler b
---     FUInt8 -> readBytesSE 1 >>= int pHandler . fromIntegral
---     FUInt16 -> readBytesSE 2 >>= int pHandler . fromIntegral
---     FUInt32 -> readBytesSE 4 >>= int pHandler . fromIntegral
---     FUInt64 -> readBytesSE 8 >>= uInt pHandler
---     FInt8 -> do
---       byte <- readBytesSE 1
---       int pHandler $ fromIntegral (fromIntegral byte :: Int8)
---     FInt16 -> do
---       word <- readBytesSE 2
---       int pHandler $ fromIntegral (fromIntegral word :: Int16)
---     FInt32 -> do
---       word <- readBytesSE 4
---       int pHandler $ fromIntegral (fromIntegral word :: Int32)
---     FInt64 -> do
---       word <- readBytesSE 8
---       int pHandler $ fromIntegral (fromIntegral word :: Int64)
---     FFloat32 -> readBytesSE 4 >>= float pHandler . wordToFloat . fromIntegral
---     FFloat64 -> readBytesSE 8 >>= double pHandler . wordToDouble
---     --Bin8 | Bin16 | Bin32
---     --Str8 | Str16 | Str32
---     --Ns8 | Ns16 | Ns32
---     --Classname
---     --Array
---     --Map
---     --Obj
---     --Fixbin Int | Fixstr Int | Fixns Int
---     FUnused -> throwM $ FormatException Unused
-
 -- read n bytes and OR them into a single n-byte word
 readBytes n =
   if n > 0
@@ -205,13 +149,14 @@ data PackType = Int Int
   | Bool Bool
   | Float Float
   | Double Double
-  | Bin ByteString
-  | Str Text
-  | NS Text
+  | Bin C.ByteString
+  | Str Text.Text
+  | NS Text.Text
   | Array
   | Object
   | Map
   | Classname
+  deriving (Show, Eq, Ord)
 
 data StateStack = Arr
   | Mp
@@ -220,22 +165,23 @@ data StateStack = Arr
   | ClsNm
   | EntryValue
   | LocalName
+  deriving (Show, Eq, Ord)
 
---readString :: Int -> ByteString -> StateT [StateStack] (StateT s m) ByteString
+--readString :: Int -> C.ByteString -> StateT [StateStack] (StateT s m) C.ByteString
 readString n byteString =
-  let len = length byteString in
+  let len = C.length byteString in
   if len < n
   then do
     suffix <- lift $ takeS (n - len)
-    readString n $ append byteString suffix
+    readString n $ C.append byteString suffix
   else pure byteString
 
-readStream len = readString len empty
+readStream len = readString len C.empty
 
 --valueEnd :: StateT [StateStack] (StateT s m) ()
 --valueEnd =
 
-validateNonText :: (MonadThrow m, MonadCatch m, ByteStream s m) =>
+validateNonText :: (MonadThrow m, MonadCatch m, Stream s m p) =>
  StateT [StateStack] (StateT s m) ()
 validateNonText = do
   ss <- get
@@ -258,7 +204,7 @@ validateNonText = do
         EntryValue -> pure ()
         LocalName -> throwM $ FormatException LocalNameException
 
-readValue :: (MonadThrow m, MonadCatch m, ByteStream s m) =>
+readValue :: (MonadThrow m, MonadCatch m, Stream s m p) =>
   StateT [StateStack] (StateT s m) PackType
 readValue = do
   byte <- catch (lift unconsS) $ throwM . ByteStreamException
