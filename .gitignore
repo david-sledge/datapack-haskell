@@ -80,3 +80,5 @@ local.properties
 
 #Atom IDE
 .stack-work/
+
+stack.yaml.lock

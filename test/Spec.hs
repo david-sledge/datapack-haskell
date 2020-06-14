@@ -1,18 +1,14 @@
-{-# LANGUAGE MultiParamTypeClasses, FlexibleInstances #-}
+{-# LANGUAGE MultiParamTypeClasses #-}
 
-import Control.Exception.Safe
-import Control.Monad.Identity
-import Control.Monad.Trans.Class
-import Control.Monad.Trans.Identity
-import Control.Monad.Trans.State
 import Data.Function (on)
 import Data.Word
-import qualified Data.ByteString as C
+import qualified Data.ByteString.Lazy as C
 import Test.HUnit
+import System.Exit (exitFailure)
 
-import Data.DataPack
-import Data.DataPack.Get
+import Data.DataPack.Unpack
 
+{-
 instance Eq SomeException where
     (==) = (==) `on` displayException
 
@@ -67,3 +63,76 @@ testValidateNonText =
   ]
 
 main = runTestTT $ TestList (testReadNil:testValidateNonText)
+--}
+
+failure str = const . const $ putStrLn str >> exitFailure
+
+failure' str = const $ failure str
+
+failCallbacks = Callbacks {
+    nil = failure "nil",
+    collectionEnd = failure "collectionEnd",
+    boolean = failure' "boolean",
+    int = failure' "int",
+    uint32 = failure' "uint32",
+    uint64 = failure' "uint64",
+    int64 = failure' "int64",
+    float = failure' "float",
+    double = failure' "double",
+    binStart = failure' "binStart",
+    strStart = failure' "strStart",
+    nsStart = failure' "nsStart",
+    dat = failure' "dat",
+    classname = failure "classname",
+    sequenceD = failure "sequence",
+    dictionary = failure "dictionary",
+    object = failure "object" }
+
+instance DataSource C.ByteString () where
+    take = \n bstr bad good ->
+      if C.length bstr == 0
+      then bad () (bstr, bstr)
+      else
+        let (body, tail) = C.splitAt (fromIntegral n) bstr in
+        good (body, tail)
+
+--myCatchers :: (DataSource s e, Show e) => Catchers e s (IO b)
+myCatchers = Catchers {
+  stream = \e _ _ _ -> (putStrLn $ "stream fail " ++ show e) >>
+    exitFailure,
+  invalidByte = \byte stack allowedByteRanges s f ->
+    (putStrLn $ "fail " ++
+      show byte ++ " is not allowed with state of " ++ show stack ++
+      ". Expected values within the ranges of "
+        ++ show allowedByteRanges ++ ".") >>
+    exitFailure,
+  unusedByte = \byte s f ->
+    (putStrLn $ "fail " ++ show byte ++ " is not a usable byte.") >>
+    exitFailure,
+  programmatic =
+    putStrLn "Super fail! Programmatic error! Flog the developer!" >>
+    exitFailure }
+
+myCallbacks = failCallbacks {
+    nil = \s f -> putStrLn "pass" >> f s }
+
+nilSource = C.pack [classnameByte, classnameByte + 1, nilByte]
+
+--testUnpackT :: (DataSource C.ByteString e, Show e) => IO ()
+testUnpackT = (
+    unpackDataT (C.pack [nilByte]) myCatchers
+    (failCallbacks {
+    nil = nil defaultCallbacks })
+    . const $ putStrLn "pass" ){- >>
+  unpackDataT
+  nilSource
+  myCatchers
+  myCallbacks (
+    \endStream ->
+    unpackDataT endStream myCatchers myCallbacks
+      . const $ print "fail" ) >>
+  (unpackDataT nilSource myCatchers myCallbacks
+    . const $ print "fail")
+--}
+
+main = testUnpackT
