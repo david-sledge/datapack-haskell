@@ -1,138 +1,126 @@
-{-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE MultiParamTypeClasses, FlexibleContexts #-}
 
+import Control.Monad.Identity
+import Control.Monad.State
+import Control.Monad.State.Class
 import Data.Function (on)
 import Data.Word
+import Data.Int
 import qualified Data.ByteString.Lazy as C
-import Test.HUnit
 import System.Exit (exitFailure)
 
+import Data.DataPack
 import Data.DataPack.Unpack
 
-{-
-instance Eq SomeException where
-    (==) = (==) `on` displayException
+data ByteStringPos = ByteStringPos {
+    byteString :: C.ByteString,
+    pos :: Int64
+  }
 
-data StreamWithPosition = StreamWithPosition C.ByteString Int
-  deriving (Show, Eq, Ord)
-
-data EndOfStreamException = EndOfStreamException
-  deriving (Show, Typeable, Eq, Ord)
-
-instance Exception EndOfStreamException
-
-instance (Monad m, MonadThrow m) => Stream StreamWithPosition m Int where
-  take n (StreamWithPosition bstr pos) =
-    if n > C.length bstr
-    then throwM EndOfStreamException
-    else
-      let (body, tail) = C.splitAt n bstr in
-      pure (body, StreamWithPosition tail $ pos + n)
-  getPos (StreamWithPosition bstr pos) = pure pos
-
-testWrapper label exec assertion = TestLabel label . TestCase $ assertion exec
-
-testReadNil = testWrapper "testReadNil" (
-    runIdentityT . runStateT (runStateT readValue [])
-    $ StreamWithPosition (C.pack [nilByte]) 0
-    :: Either SomeException ((PackType, [StateStack]), StreamWithPosition))
-  $ assertEqual "testReadNil" $ Right ((Nil,[]),StreamWithPosition C.empty 1)
-
-testValidateNonText_ ss label a = testWrapper label (
-  runIdentityT . runStateT (runStateT validateNonText ss)
-  $ StreamWithPosition C.empty 0
-  :: Either SomeException (((), [StateStack]), StreamWithPosition))
-  $ assertEqual "testValidateNonText" a
-
-
-testValidateNonText =
-  [ testValidateNonText_ [] "non text with empty stack" $ Right (((),[]),StreamWithPosition C.empty 0)
-  , testValidateNonText_ [Arr] "non text with Arr state" $ Right (((),[Arr]),StreamWithPosition C.empty 0)
-  , testValidateNonText_ [Mp] "non text with Mp state" $ Right (((),[Mp]),StreamWithPosition C.empty 0)
-  , testValidateNonText_ [Obj] "non text with Obj state" . Left . SomeException . FormatException . OptionException CollectionEndException $ OptionException NamespaceException LocalNameException
-  , testValidateNonText_ [ColInit] "non text with ColInit state" . Left . SomeException $ FormatException InvalidStateException
-  , testValidateNonText_ [ClsNm] "non text with ClsNm state" . Left . SomeException . FormatException $ OptionException NamespaceException LocalNameException
-  , testValidateNonText_ [EntryValue] "non text with EntryValue state" $ Right (((),[EntryValue]),StreamWithPosition C.empty 0)
-  , testValidateNonText_ [LocalName] "non text with LocalName state" . Left . SomeException $ FormatException LocalNameException
-  , testValidateNonText_ [ColInit, Obj] "non text with [ColInit, Obj] stack" . Left . SomeException . FormatException . OptionException (OptionException ClassnameException CollectionEndException) $ OptionException NamespaceException LocalNameException
-  , testValidateNonText_ [ColInit, Arr] "non text with [ColInit, Arr] stack" $ Right (((),[Arr]),StreamWithPosition C.empty 0)
-  , testValidateNonText_ [ColInit, Mp] "non text with [ColInit, Mp] stack" . Left . SomeException $ FormatException InvalidStateException
-  , testValidateNonText_ [ColInit, ColInit] "non text with [ColInit, ColInit] stack" . Left . SomeException $ FormatException InvalidStateException
-  , testValidateNonText_ [ColInit, ClsNm] "non text with [ColInit, ClsNm] stack" . Left . SomeException $ FormatException InvalidStateException
-  , testValidateNonText_ [ColInit, EntryValue] "non text with [ColInit, EntryValue] stack" . Left . SomeException $ FormatException InvalidStateException
-  , testValidateNonText_ [ColInit, LocalName] "non text with [ColInit, LocalName] stack" . Left . SomeException $ FormatException InvalidStateException
-  ]
-
-main = runTestTT $ TestList (testReadNil:testValidateNonText)
---}
-
-failure str = const . const $ putStrLn str >> exitFailure
-
-failure' str = const $ failure str
-
-failCallbacks = Callbacks {
-    nil = failure "nil",
-    collectionEnd = failure "collectionEnd",
-    boolean = failure' "boolean",
-    int = failure' "int",
-    uint32 = failure' "uint32",
-    uint64 = failure' "uint64",
-    int64 = failure' "int64",
-    float = failure' "float",
-    double = failure' "double",
-    binStart = failure' "binStart",
-    strStart = failure' "strStart",
-    nsStart = failure' "nsStart",
-    dat = failure' "dat",
-    classname = failure "classname",
-    sequenceD = failure "sequence",
-    dictionary = failure "dictionary",
-    object = failure "object" }
-
-instance DataSource C.ByteString () where
-    take = \n bstr bad good ->
-      if C.length bstr == 0
-      then bad () (bstr, bstr)
+instance DataSource ByteStringPos () where
+    take = \n bstr bad good -> let
+        string = byteString bstr
+      in
+      if C.length string == 0
+      then bad () (string, bstr)
       else
-        let (body, tail) = C.splitAt (fromIntegral n) bstr in
-        good (body, tail)
+        let
+          n' = fromIntegral n
+          (body, tail) = C.splitAt n' string
+        in
+        good (body, ByteStringPos tail $ pos bstr + n')
 
---myCatchers :: (DataSource s e, Show e) => Catchers e s (IO b)
-myCatchers = Catchers {
-  stream = \e _ _ _ -> (putStrLn $ "stream fail " ++ show e) >>
-    exitFailure,
+data Results = Ok
+  | Fail Int64 String
+  deriving Show
+
+createDefaultCallbacks f = let
+    g str = const $ f str
+  in
+  Callbacks {
+      nil = f "nil",
+      collectionEnd = f "collectionEnd",
+      boolean = g "boolean",
+      int = g "int",
+      uint32 = g "uint32",
+      uint64 = g "uint64",
+      int64 = g "int64",
+      float = g "float",
+      double = g "double",
+      binStart = g "binStart",
+      strStart = g "strStart",
+      nsStart = g "nsStart",
+      dat = g "dat",
+      className = f "className",
+      sequenceD = f "sequence",
+      dictionary = f "dictionary",
+      object = f "object" }
+
+failCallbacks :: Applicative m => String -> Callbacks ByteStringPos (m Results)
+failCallbacks expectedStr = createDefaultCallbacks $ \str s _ ->
+    pure $ Fail (pos s) ("Expected " ++ expectedStr ++ ", found " ++ str)
+
+passCallbacks = createDefaultCallbacks $ \_ s f -> f s
+
+newtype CallbackStack s st m = CallbackStack {
+    getStack :: [Callbacks s (StateT (CallbackStack s st m) m Results)] }
+
+passThruCallbacks :: Monad m =>
+  Callbacks ByteStringPos (StateT (CallbackStack ByteStringPos st m) m Results)
+passThruCallbacks = createDefaultCallbacks $ \str s f ->
+  get >>= \cbs ->
+    case getStack cbs of
+      cb:cbs' -> put (CallbackStack cbs') >> nil cb s f
+      _ -> pure $ Fail (pos s) $ "unexpected " ++ str
+
+catchers :: Monad m =>
+  Catchers () ByteStringPos (StateT (CallbackStack ByteStringPos st m) m Results)
+catchers = Catchers {
+  stream = \e _ s _ -> pure $ Fail (pos s) $ "stream fail " ++ show e,
   invalidByte = \byte stack allowedByteRanges s f ->
-    (putStrLn $ "fail " ++
+    pure $ Fail (pos s) $ "fail " ++
       show byte ++ " is not allowed with state of " ++ show stack ++
       ". Expected values within the ranges of "
-        ++ show allowedByteRanges ++ ".") >>
-    exitFailure,
+        ++ show allowedByteRanges ++ ".",
   unusedByte = \byte s f ->
-    (putStrLn $ "fail " ++ show byte ++ " is not a usable byte.") >>
-    exitFailure,
-  programmatic =
-    putStrLn "Super fail! Programmatic error! Flog the developer!" >>
-    exitFailure }
+    pure $ Fail (pos s) $ "fail " ++ show byte ++ " is not a usable byte.",
+  programmatic = undefined }
 
-myCallbacks = failCallbacks {
-    nil = \s f -> putStrLn "pass" >> f s }
+testCase bytString callbackStack catchers expectedBytesRemaining =
+  runStateT (unpackDataT (ByteStringPos bytString 0) catchers passThruCallbacks $ \bStrPos ->
+    let len = C.length $ byteString bStrPos in
+    pure $ if len == expectedBytesRemaining
+      then Ok
+      else Fail (pos bStrPos) $ "Expected " ++ show expectedBytesRemaining ++ " byte(s) remaining in byteString. Found " ++ show len ++ " byte(s).")
+    $ CallbackStack callbackStack
 
-nilSource = C.pack [classnameByte, classnameByte + 1, nilByte]
+runTests testCases =
+  putStrLn "Running tests...\n" >> let
+      (io, (runCount, failCount)) = foldl (
+          \(ioAcc, (runCount, failCount)) (testName, resultsAndRemainBytes) ->
+            let
+              (results, _) = runIdentity resultsAndRemainBytes
+              runCount' = runCount + 1
+              prefix = '\t':show runCount' ++ ") test " ++ testName ++ ": "
+            in
+            case results of
+            Ok -> (ioAcc >> putStrLn (prefix ++ "passed"), (runCount', failCount))
+            Fail pos msg -> (ioAcc >> putStrLn (prefix ++ "failed at position " ++ show pos ++ "\x2014" ++ msg), (runCount', failCount + 1))
+        ) (pure (), (0, 0)) testCases
+  in
+  io >>
+  if failCount == 0
+  then putStrLn $ "\nSuccess! All " ++ show runCount ++ " test(s) passed."
+  else (putStrLn $ '\n':show failCount ++ " out of " ++ show runCount ++ " test(s) failed.") >> exitFailure
 
---testUnpackT :: (DataSource C.ByteString e, Show e) => IO ()
-testUnpackT = (
-    unpackDataT (C.pack [nilByte]) myCatchers
-    (failCallbacks {
-    nil = nil defaultCallbacks })
-    . const $ putStrLn "pass" ){- >>
-  unpackDataT
-  nilSource
-  myCatchers
-  myCallbacks (
-    \endStream ->
-    unpackDataT endStream myCatchers myCallbacks
-      . const $ print "fail" ) >>
-  (unpackDataT nilSource myCatchers myCallbacks
-    . const $ print "fail")
---}
+testUnpackT :: IO ()
+testUnpackT = runTests [
+        ("single nil", testCase (C.pack [nilByte]) [(failCallbacks "nil") {nil = nil passCallbacks}] catchers 0),
+        ("single nil", testCase (C.pack []) [(failCallbacks "nil") {nil = nil passCallbacks}] catchers 0),
+        ("single nil", testCase (C.pack [nilByte]) [(failCallbacks "dictionary") {dictionary = dictionary passCallbacks}] catchers 0),
+        ("single nil", testCase (C.pack [nilByte]) [] catchers 0),
+        ("single nil", testCase (C.pack [nilByte]) [(failCallbacks "nil") {nil = nil passCallbacks}] catchers 1),
+        ("single nil", testCase (C.pack [nilByte, dictionaryByte]) [(failCallbacks "nil") {nil = nil passCallbacks}] catchers 1)
+      ]
 
 main = testUnpackT

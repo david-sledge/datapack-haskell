@@ -18,19 +18,16 @@ module Data.DataPack.Pack (
   DataDestination,
   PackState,
   Catchers(..),
---  packDataT
+  packDataT,
 ) where
 
-import Control.Monad.Trans.Class
 import Control.Monad.Trans.Cont
-import Control.Monad.Trans.Except
 import Control.Monad.Trans.Reader
 import Control.Monad.Trans.State
 import Data.Binary.IEEE754
 import Data.Bits
 import qualified Data.ByteString.Lazy as C
 import Data.Int
-import qualified Data.Map.Lazy as Map
 import Data.Maybe
 import qualified Data.Text.Lazy as T
 import Data.Text.Lazy.Encoding
@@ -69,13 +66,6 @@ data Catchers e d r = Catchers {
     invalidPackType :: PackState -> Callback d r,
     programmatic :: r }
 
-modifyAnd f andf = StateT $ \s -> let s' = f s in pure (andf s', s')
-
-stateReaderContT :: ((a -> m r) -> m r) -> StateT b (ReaderT c (ContT r m)) a
-stateReaderContT = lift . lift . ContT
-
-catcherAsk f = lift ask >>= f
-
 putDestinationAnd d a = modifyAnd (\states -> states { destination = d }) (const a)
 
 putDestination d = putDestinationAnd d ()
@@ -89,20 +79,20 @@ getState f = get >>= f . packState
 callWithDestination ca = getDestination $ (\r -> stateReaderContT r >>= putDestination) . ca
 
 callInvalidPackTypeHandler = getState $ \state ->
-    catcherAsk $ \catchers ->
+    contAsk $ \catchers ->
     callWithDestination $ invalidPackType catchers state
 
-callTooBigErrorHandler byteString = catcherAsk $ \catchers ->
+callTooBigErrorHandler byteString = contAsk $ \catchers ->
     callWithDestination $ tooBig catchers byteString
 
-callProgrammaticErrorHandler = catcherAsk $
+callProgrammaticErrorHandler = contAsk $
     stateReaderContT . const . programmatic
 
 givePack dat =
   getDestination $ \d ->
   give dat d (
       \e (n, d') ->
-        catcherAsk $ \catchers ->
+        contAsk $ \catchers ->
         stateReaderContT (stream catchers e n d') >>= \(n', d'') ->
         putDestination d'' )
     $ \(n, d') -> putDestination d'
@@ -228,7 +218,7 @@ packQName (nsName, localName) = let
   _ -> packStr
 
 packClassName qname =
-  packSingleByte classnameByte >>
+  packSingleByte classNameByte >>
   packQName qname
 
 transitionToCollection state packContents = verisitionValue (

@@ -1,5 +1,9 @@
 module Data.DataPack where
 
+import Control.Monad.Trans.Class
+import Control.Monad.Trans.Cont
+import Control.Monad.Trans.Reader
+import Control.Monad.Trans.State
 import Data.Word
 
 fixintMask        = 0xc0::Word8
@@ -26,7 +30,7 @@ str32Byte         = 0x53::Word8
 ns8Byte           = 0x54::Word8
 ns16Byte          = 0x55::Word8
 ns32Byte          = 0x56::Word8
-classnameByte     = 0x57::Word8
+classNameByte     = 0x57::Word8
 sequenceByte      = 0x58::Word8
 dictionaryByte    = 0x59::Word8
 objectByte        = 0x5a::Word8
@@ -36,3 +40,10 @@ fixstrMask        = 0x80::Word8
 fixnsMask         = 0xa0::Word8
 fixMask           = 0xe0::Word8
 lenMask           = 0x1f::Word8
+
+modifyAnd f andf = StateT $ \s -> let s' = f s in pure (andf s', s')
+
+stateReaderContT :: ((a -> m r) -> m r) -> StateT b (ReaderT c (ContT r m)) a
+stateReaderContT = lift . lift . ContT
+
+contAsk f = lift ask >>= f

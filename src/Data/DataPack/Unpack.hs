@@ -39,7 +39,7 @@ module Data.DataPack.Unpack (
     ns8Byte,
     ns16Byte,
     ns32Byte,
-    classnameByte,
+    classNameByte,
     sequenceByte,
     dictionaryByte,
     objectByte,
@@ -54,14 +54,13 @@ module Data.DataPack.Unpack (
     UnpackState(..),
     Catchers(..),
     Callbacks(..),
+    States(..),
     defaultCallbacks,
     unpackDataT,
   ) where
 
 import Prelude hiding (take)
-import Control.Monad.Trans.Class
 import Control.Monad.Trans.Cont
-import Control.Monad.Trans.Except
 import Control.Monad.Trans.Reader
 import Control.Monad.Trans.State
 import Data.Binary.IEEE754
@@ -81,18 +80,19 @@ class DataSource s e | s -> e where
        -> r -- result of error or success handler
 
 data UnpackState =
-   Sequence
-   | Dictionary
-   | Object
-   | SequenceStart
-   | ObjectStart
-   | Classname
-   | EntryValue
-   | LocalName
-   deriving (Show, Ord, Eq)
+  Root
+  | Sequence UnpackState
+  | Dictionary UnpackState
+  | Object UnpackState
+  | SequenceStart UnpackState
+  | ObjectStart UnpackState
+  | ClassName UnpackState
+  | EntryValue UnpackState
+  | LocalName UnpackState
+  deriving (Show, Ord, Eq)
 
 data States s = States {
-    unpackStack :: [UnpackState],
+    unpackState :: UnpackState,
     source :: s }
   deriving (Show, Ord, Eq)
 
@@ -101,7 +101,7 @@ type Callback s r = s -> (s -> r) -> r
 -- exception handlers
 data Catchers e s r = Catchers {
     stream :: e -> C.ByteString -> s -> ((C.ByteString, s) -> r) -> r,
-    invalidByte :: Word8 -> [UnpackState] -> [(Word8, Word8)] -> Callback s r,
+    invalidByte :: Word8 -> UnpackState -> [(Word8, Word8)] -> Callback s r,
     unusedByte :: Word8 -> Callback s r,
     programmatic :: r }
 
@@ -119,7 +119,7 @@ data Callbacks s r = Callbacks {
     strStart :: Word32 -> Callback s r,
     nsStart :: Word32 -> Callback s r,
     dat :: C.ByteString -> Callback s r,
-    classname :: Callback s r,
+    className :: Callback s r,
     sequenceD :: Callback s r,
     dictionary :: Callback s r,
     object :: Callback s r }
@@ -142,7 +142,7 @@ defaultCallbacks = Callbacks {
     strStart = callbk',
     nsStart = callbk',
     dat = callbk',
-    classname = callbk,
+    className = callbk,
     sequenceD = callbk,
     dictionary = callbk,
     object = callbk }
@@ -151,30 +151,25 @@ data Env e s r = Env {
   catchers :: Catchers e s r,
   callbacks :: Callbacks s r }
 
-modifyAnd f andf = StateT $ \s -> let s' = f s in pure (andf s', s')
+catcherAsk f = contAsk $ f . catchers
 
-stateReaderContT :: ((a -> m r1) -> m r1) -> StateT b (ReaderT r2 (ContT r1 m)) a
-stateReaderContT = lift . lift . ContT
-
-catcherAsk f = lift ask >>= f . catchers
-
-callbackAsk f = lift ask >>= f . callbacks
+callbackAsk f = contAsk $ f . callbacks
 
 putSourceAnd s a = modifyAnd (\states -> states { source = s }) (const a)
 
 putSource s = putSourceAnd s ()
 
-putStateStack stack = modify (\states -> states { unpackStack = stack })
+putState state = modify (\states -> states { unpackState = state })
 
 getSource f = get >>= f . source
 
-getStateStack f = get >>= f . unpackStack
+getState f = get >>= f . unpackState
 
 callWithSource cb = getSource $ (\r -> stateReaderContT r >>= putSource) . cb
 
-callInvalidByteErrorHandler byte allowedBytes = getStateStack $ \stack ->
+callInvalidByteErrorHandler byte allowedBytes = (getState $ \state ->
     catcherAsk $ \catchers ->
-    callWithSource $ invalidByte catchers byte stack allowedBytes
+    callWithSource $ invalidByte catchers byte state allowedBytes) >> unpackT
 
 callUnusedByteErrorHandler byte = catcherAsk $ \catchers ->
     callWithSource $ unusedByte catchers byte
@@ -185,7 +180,7 @@ callProgrammaticErrorHandler = catcherAsk $
 -- interprets byte as a signed 8-bit integer
 fromByteToInt byte = fromIntegral (fromIntegral byte :: Int8)
 
-validBytesDict = let
+validStateBytes state = let
     valueRanges = [
         (fixintMask, fixintMask `xor` 0xff),
         (nilByte, nilByte),
@@ -211,19 +206,16 @@ validBytesDict = let
     propNameRanges = (nilByte, nilByte):
         (collectionEndByte, collectionEndByte):qnameRanges
   in
-  Map.fromList [
-    (Just Sequence, sequenceRanges),
-    (Just SequenceStart, (classnameByte, classnameByte):sequenceRanges),
-    (Just Dictionary, sequenceRanges),
-    (Just Object, propNameRanges),
-    (Just ObjectStart, (classnameByte, classnameByte):propNameRanges),
-    (Just Classname, qnameRanges),
-    (Just EntryValue, sequenceRanges),
-    (Just LocalName, localnameRanges),
-    (Nothing, valueRanges) ]
-
-headSafe (x:xs) = Just x
-headSafe _ = Nothing
+  case state of
+  Sequence _ -> sequenceRanges
+  SequenceStart _ -> (classNameByte, classNameByte):sequenceRanges
+  Dictionary _ -> sequenceRanges
+  Object _ -> propNameRanges
+  ObjectStart _ -> (classNameByte, classNameByte):propNameRanges
+  ClassName _ -> qnameRanges
+  EntryValue _ -> sequenceRanges
+  LocalName _ -> localnameRanges
+  Root -> valueRanges
 
 takeUnpack n =
   getSource $ \s ->
@@ -324,183 +316,115 @@ More than just validation:
 3. additional processing which includes
   a. reading additional data (sometimes)
   b. making callbacks (every time)
-4. mutually recurse (unless the resulting state stack is empty)
+4. mutually recurse (unless the resulting state is Root)
 -}
 validateValueState byte procMore = let
     onward = procMore >> unpackT
   in
-  getStateStack $ \stateStack ->
-  case Map.lookup (headSafe stateStack) validBytesDict of
-  Just validBytes -> let
-      callInvalidByte =
-        callInvalidByteErrorHandler byte validBytes >> unpackT
-    in
-    case stateStack of
-    Sequence:_ -> onward
-    Dictionary:_ -> putStateStack (EntryValue:stateStack) >> onward
-    Object:_ -> callInvalidByte
-    SequenceStart:stateStack' -> putStateStack (Sequence:stateStack') >> onward
-    ObjectStart:_ -> callInvalidByte
-    Classname:_ -> callInvalidByte
-    EntryValue:stateStack' -> putStateStack stateStack' >> onward
-    LocalName:_ -> callInvalidByte
-    _ -> procMore
-  -- flog the developer!
-  _ -> callProgrammaticErrorHandler >> unpackT
+  getState $ \state ->
+    case state of
+    Root -> procMore
+    Sequence _ -> onward
+    Dictionary _ -> putState (EntryValue state) >> onward
+    SequenceStart state' -> putState (Sequence state') >> onward
+    EntryValue state' -> putState state' >> onward
+    _ -> callInvalidByteErrorHandler byte (validStateBytes state)
 
 validateCollectionEndState byte procMore = let
     onward = procMore >> unpackT
-    parent stateStack =
-      case stateStack of
-      Sequence:_ -> putStateStack stateStack >> onward
-      Dictionary:_ -> putStateStack (EntryValue:stateStack) >> onward
-      Object:_ -> callProgrammaticErrorHandler >> unpackT
-      SequenceStart:_ -> callProgrammaticErrorHandler >> unpackT
-      ObjectStart:_ -> callProgrammaticErrorHandler >> unpackT
-      Classname:_ -> callProgrammaticErrorHandler >> unpackT
-      EntryValue:stateStack' -> putStateStack stateStack' >> onward
-      LocalName:_ -> callProgrammaticErrorHandler >> unpackT
-      _ -> putStateStack [] >> procMore
+    parent state =
+      case state of
+      Root -> procMore
+      Sequence _ -> putState state >> unpackT
+      Dictionary _ -> putState (EntryValue state) >> unpackT
+      EntryValue state' -> putState state' >> unpackT
+      _ -> callProgrammaticErrorHandler >> unpackT
   in
-  getStateStack $ \stateStack ->
-  case Map.lookup (headSafe stateStack) validBytesDict of
-  Just validBytes -> let
-      callInvalidByte =
-        callInvalidByteErrorHandler byte validBytes >> unpackT
-      pop stack = putStateStack stack >> onward
-    in
-    case stateStack of
-    Sequence:stateStack' -> parent stateStack' >> onward
-    Dictionary:stateStack' -> parent stateStack'
-    Object:stateStack' -> parent stateStack'
-    SequenceStart:stateStack' -> parent stateStack'
-    ObjectStart:stateStack' -> parent stateStack'
-    Classname:_ -> callInvalidByte
-    EntryValue:stateStack'' -> (let
-        extraCall stack = callbackAsk $ \callbacks ->
-          (callWithSource $ nil callbacks) >> parent stack
+  getState $ \state ->
+    case state of
+    Sequence state' -> procMore >> parent state'
+    Dictionary state' -> procMore >> parent state'
+    Object state' -> procMore >> parent state'
+    SequenceStart state' -> procMore >> parent state'
+    ObjectStart state' -> procMore >> parent state'
+    EntryValue state'' -> (let
+        extraCall state = callbackAsk $ \callbacks ->
+          (callWithSource $ nil callbacks) >> parent state
       in
-      case stateStack'' of
-      Dictionary:stateStack' -> extraCall stateStack'
-      Object:stateStack' -> extraCall stateStack'
+      case state'' of
+      Dictionary state' -> extraCall state'
+      Object state' -> extraCall state'
+      -- flog the developer!
       _ -> callProgrammaticErrorHandler >> unpackT )
-    LocalName:_ -> callInvalidByte
-    _ -> callInvalidByte
-  -- flog the developer!
-  _ -> callProgrammaticErrorHandler >> unpackT
+    _ -> callInvalidByteErrorHandler byte (validStateBytes state)
 
 validateStringState byte procMore = let
     onward = procMore >> unpackT
   in
-  getStateStack $ \stateStack ->
-  case Map.lookup (headSafe stateStack) validBytesDict of
-  Just validBytes -> case stateStack of
-    Sequence:_ -> onward
-    Dictionary:_ -> putStateStack (EntryValue:stateStack) >> onward
-    Object:_ -> putStateStack (EntryValue:stateStack) >> onward
-    SequenceStart:stateStack' -> putStateStack (Sequence:stateStack') >> onward
-    ObjectStart:stateStack' ->
-      putStateStack (EntryValue:Object:stateStack') >> onward
-    Classname:stateStack' -> putStateStack stateStack' >> onward
-    EntryValue:stateStack' -> putStateStack stateStack' >> onward
-    LocalName:stateStack' -> (
-        case stateStack' of
+  getState $ \state -> case state of
+    Sequence _ -> onward
+    Dictionary _ -> putState (EntryValue state) >> onward
+    Object _ -> putState (EntryValue state) >> onward
+    SequenceStart state' -> putState (Sequence state') >> onward
+    ObjectStart state' ->
+      putState (EntryValue $ Object state') >> onward
+    ClassName state' -> putState state' >> onward
+    EntryValue state' -> putState state' >> onward
+    LocalName state' -> (
+        case state' of
         -- transition to entry value (object) or
-        Object:_ -> putStateStack (EntryValue:stateStack')
-        -- pop Classname (object/sequence) off the stack
-        Classname:ss -> putStateStack ss
+        Object _ -> putState (EntryValue state')
+        -- pop ClassName (object/sequence) off the state
+        ClassName ss -> putState ss
         -- flog the developer!
         _ -> callProgrammaticErrorHandler ) >> onward
     _ -> procMore
-  -- flog the developer!
-  _ -> callProgrammaticErrorHandler >> unpackT
 
 validateNamespaceState byte procMore = let
     onward = procMore >> unpackT
   in
-  getStateStack $ \stateStack ->
-  case Map.lookup (headSafe stateStack) validBytesDict of
-  Just validBytes -> let
-      callInvalidByte = callInvalidByteErrorHandler byte validBytes >> unpackT
-    in
-    case stateStack of
-    Sequence:_ -> callInvalidByte
-    Dictionary:_ -> callInvalidByte
-    Object:_ -> putStateStack (LocalName:stateStack) >> onward
-    SequenceStart:_ -> callInvalidByte
-    ObjectStart:stateStack' ->
-      putStateStack (LocalName:Object:stateStack') >> onward
-    Classname:_ -> putStateStack (LocalName:stateStack) >> onward
-    EntryValue:_ -> callInvalidByte
-    LocalName:_ -> callInvalidByte
-    _ -> callInvalidByte
-  -- flog the developer!
-  _ -> callProgrammaticErrorHandler >> unpackT
+  getState $ \state ->
+    case state of
+    Object _ -> putState (LocalName state) >> onward
+    ObjectStart state' ->
+      putState (LocalName $ Object state') >> onward
+    ClassName _ -> putState (LocalName state) >> onward
+    _ -> callInvalidByteErrorHandler byte (validStateBytes state)
 
-validateClassnameState byte procMore = let
+validateClassNameState byte procMore = let
     onward = procMore >> unpackT
   in
-  getStateStack $ \stateStack ->
-  case Map.lookup (headSafe stateStack) validBytesDict of
-  Just validBytes -> let
-      callInvalidByte = callInvalidByteErrorHandler byte validBytes >> unpackT
-    in
-    case stateStack of
-    Sequence:_ -> callInvalidByte
-    Dictionary:_ -> callInvalidByte
-    Object:_ -> callInvalidByte
-    SequenceStart:stack -> putStateStack (Classname:Sequence:stack) >> onward
-    ObjectStart:stack -> putStateStack (Classname:Object:stack) >> onward
-    Classname:_ -> callInvalidByte
-    EntryValue:_ -> callInvalidByte
-    LocalName:_ -> callInvalidByte
-    _ -> callInvalidByte
-  -- flog the developer!
-  _ -> callProgrammaticErrorHandler >> unpackT
+  getState $ \state ->
+    case state of
+    SequenceStart state -> putState (ClassName $ Sequence state) >> onward
+    ObjectStart state -> putState (ClassName $ Object state) >> onward
+    _ -> callInvalidByteErrorHandler byte (validStateBytes state)
 
 validateNilState byte procMore = let
     onward = procMore >> unpackT
   in
-  getStateStack $ \stateStack ->
-  case Map.lookup (headSafe stateStack) validBytesDict of
-  Just validBytes -> let
-      callInvalidByte = callInvalidByteErrorHandler byte validBytes >> unpackT
-    in
-    case stateStack of
-      Sequence:_ -> onward
-      Dictionary:_ -> putStateStack (EntryValue:stateStack) >> onward
-      Object:_ -> putStateStack (EntryValue:stateStack) >> onward
-      SequenceStart:stateStack' -> putStateStack (Sequence:stateStack') >> onward
-      ObjectStart:stack -> putStateStack (EntryValue:Object:stack) >> onward
-      Classname:_ -> callInvalidByte
-      EntryValue:stateStack' -> putStateStack stateStack' >> onward
-      LocalName:_ -> callInvalidByte
-      _ -> procMore
-  -- flog the developer!
-  _ -> callProgrammaticErrorHandler >> unpackT
+  getState $ \state ->
+    case state of
+      Root -> procMore
+      Sequence _ -> onward
+      Dictionary _ -> putState (EntryValue state) >> onward
+      Object _ -> putState (EntryValue state) >> onward
+      SequenceStart state' -> putState (Sequence state') >> onward
+      ObjectStart state -> putState (EntryValue $ Object state) >> onward
+      EntryValue state' -> putState state' >> onward
+      _ -> callInvalidByteErrorHandler byte (validStateBytes state)
 
 validateCollectionState unpackState byte procMore = let
     onward = procMore >> unpackT
   in
-  getStateStack $ \stateStack ->
-  case Map.lookup (headSafe stateStack) validBytesDict of
-  Just validBytes -> let
-      callInvalidByte = callInvalidByteErrorHandler byte validBytes >>
-        unpackT
-    in
-    case stateStack of
-    Sequence:_ -> putStateStack (unpackState:stateStack) >> onward
-    Dictionary:_ -> putStateStack (unpackState:stateStack) >> onward
-    Object:_ -> callInvalidByte
-    SequenceStart:stack -> putStateStack (unpackState:Sequence:stack) >>
-      onward
-    ObjectStart:stack -> callInvalidByte
-    Classname:_ -> callInvalidByte
-    EntryValue:stack -> putStateStack (unpackState:stateStack) >> onward
-    LocalName:_ -> callInvalidByte
-    _ -> putStateStack (unpackState:stateStack) >> onward
-  -- flog the developer!
-  _ -> callProgrammaticErrorHandler >> unpackT
+  getState $ \state ->
+    case state of
+    Root -> putState (unpackState state) >> onward
+    Sequence _ -> putState (unpackState state) >> onward
+    Dictionary _ -> putState (unpackState state) >> onward
+    SequenceStart state -> putState (unpackState $ Sequence state) >> onward
+    EntryValue state -> putState (unpackState state) >> onward
+    _ -> callInvalidByteErrorHandler byte (validStateBytes state)
 
 formatDictEntry byte valid more = (
     byte, callbackAsk $ valid byte . more )
@@ -586,8 +510,8 @@ formatDict = Map.fromList [
       readUint32 >>= \length ->
       (callWithSource $ nsStart callbacks length) >>
       readByteString length (callWithSource . dat callbacks),
-    formatDictEntry classnameByte validateClassnameState $
-      \callback -> callWithSource $ classname callback,
+    formatDictEntry classNameByte validateClassNameState $
+      \callback -> callWithSource $ className callback,
     formatDictEntry sequenceByte
       (validateCollectionState SequenceStart) $
       \callback -> callWithSource $ sequenceD callback,
@@ -616,8 +540,8 @@ fixDict = Map.fromList [
     fixDictEntry fixnsMask validateNamespaceState nsStart ]
 
 unpackDataT s catchers callbacks = \c ->
-  (runContT . runReaderT (runStateT unpackT $ States [] s) $
+  (runContT . runReaderT (runStateT unpackT $ States Root s) $
     Env catchers callbacks) ( \(_, states) ->
-    case unpackStack states of
-    [] -> c $ source states
+    case unpackState states of
+    Root -> c $ source states
     _ -> programmatic catchers )
