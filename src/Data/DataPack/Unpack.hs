@@ -96,21 +96,21 @@ data States s = States {
     source :: s }
   deriving (Show, Ord, Eq)
 
-type Callback s r = s -> (s -> r) -> r
+type Handle s c = UnpackState -> s -> c
+
+type Callback s r = Handle s ((s -> r) -> r)
 
 -- exception handlers
 data Catchers e s r = Catchers {
-    stream :: e -> C.ByteString -> s -> ((C.ByteString, s) -> r) -> r,
-    invalidByte :: Word8 -> UnpackState -> [(Word8, Word8)] -> Callback s r,
+    stream :: e -> C.ByteString -> Handle s (((C.ByteString, s) -> r) -> r),
+    invalidByte :: Word8 -> [(Word8, Word8)] -> Callback s r,
     unusedByte :: Word8 -> Callback s r,
-    programmatic :: r }
+    flogTheDeveloper :: Handle s r }
 
 data Callbacks s r = Callbacks {
     nil :: Callback s r,
     collectionEnd :: Callback s r,
     boolean :: Bool -> Callback s r,
-    int :: Int -> Callback s r,
-    uint32 :: Word32 -> Callback s r,
     uint64 :: Word64 -> Callback s r,
     int64 :: Int64 -> Callback s r,
     float :: Float -> Callback s r,
@@ -124,7 +124,7 @@ data Callbacks s r = Callbacks {
     dictionary :: Callback s r,
     object :: Callback s r }
 
-callbk = \s f -> f s
+callbk = \_ s f -> f s
 
 callbk' = const callbk
 
@@ -132,8 +132,6 @@ defaultCallbacks = Callbacks {
     nil = callbk,
     collectionEnd = callbk,
     boolean = callbk',
-    int = callbk',
-    uint32 = callbk',
     uint64 = callbk',
     int64 = callbk',
     float = callbk',
@@ -157,25 +155,19 @@ callbackAsk f = contAsk $ f . callbacks
 
 putSourceAnd s a = modifyAnd (\states -> states { source = s }) (const a)
 
-putSource s = putSourceAnd s ()
-
 putState state = modify (\states -> states { unpackState = state })
 
-getSource f = get >>= f . source
+makeCallback cb = get >>= \s ->
+  stateReaderContT (cb (unpackState s) $ source s) >>= \s' ->
+  putSourceAnd s' ()
 
-getState f = get >>= f . unpackState
-
-callWithSource cb = getSource $ (\r -> stateReaderContT r >>= putSource) . cb
-
-callInvalidByteErrorHandler byte allowedBytes = (getState $ \state ->
+callInvalidByteErrorHandler byte allowedBytes =
     catcherAsk $ \catchers ->
-    callWithSource $ invalidByte catchers byte state allowedBytes) >> unpackT
+      makeCallback (invalidByte catchers byte allowedBytes) >> unpackT
 
-callUnusedByteErrorHandler byte = catcherAsk $ \catchers ->
-    callWithSource $ unusedByte catchers byte
-
-callProgrammaticErrorHandler = catcherAsk $
-    stateReaderContT . const . programmatic
+orderTheDeveloperFlogged = catcherAsk $ \catchers ->
+    get >>= \s ->
+    stateReaderContT . const . flogTheDeveloper catchers (unpackState s) $ source s
 
 -- interprets byte as a signed 8-bit integer
 fromByteToInt byte = fromIntegral (fromIntegral byte :: Int8)
@@ -218,11 +210,11 @@ validStateBytes state = let
   Root -> valueRanges
 
 takeUnpack n =
-  getSource $ \s ->
-  take n s (
+  get >>= \s ->
+  take n (source s) (
       \e (dat, s') ->
         catcherAsk $ \catchers ->
-        stateReaderContT (stream catchers e dat s') >>= \(dat', s'') ->
+        stateReaderContT (stream catchers e dat (unpackState s) s') >>= \(dat', s'') ->
         putSourceAnd s'' dat' )
     $ \(dat, s') -> putSourceAnd s' dat
 
@@ -241,8 +233,8 @@ unpackT =
         callbackAsk $ \callbacks ->
         -- validate the byte against current state, read any additional data,
         -- and call corresponding callback after validation.
-        validateValueState byte . callWithSource .
-          int callbacks $ fromByteToInt byte
+        validateValueState byte . makeCallback .
+          int64 callbacks $ fromByteToInt byte
       else
         let mask = byte .&. fixMask in
         -- in fixDict?
@@ -255,8 +247,9 @@ unpackT =
           -- call mapped function
           Just g -> g
           -- unused byte
-          _ -> callUnusedByteErrorHandler byte >> unpackT
-    _ -> callProgrammaticErrorHandler
+          _ -> (catcherAsk $ \catchers ->
+              makeCallback $ unusedByte catchers byte) >> unpackT
+    _ -> orderTheDeveloperFlogged
 
 readByteString n c =
   takeUnpack n >>= \byteString ->
@@ -321,7 +314,8 @@ More than just validation:
 validateValueState byte procMore = let
     onward = procMore >> unpackT
   in
-  getState $ \state ->
+  get >>= \s ->
+    let state = unpackState s in
     case state of
     Root -> procMore
     Sequence _ -> onward
@@ -331,16 +325,16 @@ validateValueState byte procMore = let
     _ -> callInvalidByteErrorHandler byte (validStateBytes state)
 
 validateCollectionEndState byte procMore = let
-    onward = procMore >> unpackT
     parent state =
       case state of
-      Root -> procMore
+      Root -> putState state
       Sequence _ -> putState state >> unpackT
       Dictionary _ -> putState (EntryValue state) >> unpackT
       EntryValue state' -> putState state' >> unpackT
-      _ -> callProgrammaticErrorHandler >> unpackT
+      _ -> orderTheDeveloperFlogged >> unpackT
   in
-  getState $ \state ->
+  get >>= \s ->
+    let state = unpackState s in
     case state of
     Sequence state' -> procMore >> parent state'
     Dictionary state' -> procMore >> parent state'
@@ -349,19 +343,21 @@ validateCollectionEndState byte procMore = let
     ObjectStart state' -> procMore >> parent state'
     EntryValue state'' -> (let
         extraCall state = callbackAsk $ \callbacks ->
-          (callWithSource $ nil callbacks) >> parent state
+          (makeCallback $ nil callbacks) >> parent state
       in
       case state'' of
       Dictionary state' -> extraCall state'
       Object state' -> extraCall state'
       -- flog the developer!
-      _ -> callProgrammaticErrorHandler >> unpackT )
+      _ -> orderTheDeveloperFlogged >> unpackT )
     _ -> callInvalidByteErrorHandler byte (validStateBytes state)
 
 validateStringState byte procMore = let
     onward = procMore >> unpackT
   in
-  getState $ \state -> case state of
+  get >>= \s ->
+    let state = unpackState s in
+    case state of
     Sequence _ -> onward
     Dictionary _ -> putState (EntryValue state) >> onward
     Object _ -> putState (EntryValue state) >> onward
@@ -377,13 +373,14 @@ validateStringState byte procMore = let
         -- pop ClassName (object/sequence) off the state
         ClassName ss -> putState ss
         -- flog the developer!
-        _ -> callProgrammaticErrorHandler ) >> onward
+        _ -> orderTheDeveloperFlogged ) >> onward
     _ -> procMore
 
 validateNamespaceState byte procMore = let
     onward = procMore >> unpackT
   in
-  getState $ \state ->
+  get >>= \s ->
+    let state = unpackState s in
     case state of
     Object _ -> putState (LocalName state) >> onward
     ObjectStart state' ->
@@ -394,7 +391,8 @@ validateNamespaceState byte procMore = let
 validateClassNameState byte procMore = let
     onward = procMore >> unpackT
   in
-  getState $ \state ->
+  get >>= \s ->
+    let state = unpackState s in
     case state of
     SequenceStart state -> putState (ClassName $ Sequence state) >> onward
     ObjectStart state -> putState (ClassName $ Object state) >> onward
@@ -403,7 +401,8 @@ validateClassNameState byte procMore = let
 validateNilState byte procMore = let
     onward = procMore >> unpackT
   in
-  getState $ \state ->
+  get >>= \s ->
+    let state = unpackState s in
     case state of
       Root -> procMore
       Sequence _ -> onward
@@ -414,16 +413,17 @@ validateNilState byte procMore = let
       EntryValue state' -> putState state' >> onward
       _ -> callInvalidByteErrorHandler byte (validStateBytes state)
 
-validateCollectionState unpackState byte procMore = let
+validateCollectionState nextState byte procMore = let
     onward = procMore >> unpackT
   in
-  getState $ \state ->
+  get >>= \s ->
+    let state = unpackState s in
     case state of
-    Root -> putState (unpackState state) >> onward
-    Sequence _ -> putState (unpackState state) >> onward
-    Dictionary _ -> putState (unpackState state) >> onward
-    SequenceStart state -> putState (unpackState $ Sequence state) >> onward
-    EntryValue state -> putState (unpackState state) >> onward
+    Root -> putState (nextState state) >> onward
+    Sequence _ -> putState (nextState state) >> onward
+    Dictionary _ -> putState (nextState state) >> onward
+    SequenceStart state -> putState (nextState $ Sequence state) >> onward
+    EntryValue state -> putState (nextState state) >> onward
     _ -> callInvalidByteErrorHandler byte (validStateBytes state)
 
 formatDictEntry byte valid more = (
@@ -433,101 +433,101 @@ formatDict :: DataSource s e => Map.Map Word8
   (StateT (States s) (ReaderT (Env e s (m r)) (ContT r m)) ())
 formatDict = Map.fromList [
     formatDictEntry nilByte validateNilState $
-      \callback -> callWithSource $ nil callback,
+      \callbacks -> makeCallback $ nil callbacks,
     formatDictEntry collectionEndByte validateCollectionEndState $
-      \callbacks -> callWithSource $ collectionEnd callbacks,
+      \callbacks -> makeCallback $ collectionEnd callbacks,
     formatDictEntry falseByte validateValueState $
-      \callbacks -> callWithSource $ boolean callbacks False,
+      \callbacks -> makeCallback $ boolean callbacks False,
     formatDictEntry trueByte validateValueState $
-      \callbacks -> callWithSource $ boolean callbacks True,
+      \callbacks -> makeCallback $ boolean callbacks True,
     formatDictEntry uint8Byte validateValueState $ \callbacks ->
       readUint8 >>= \integer ->
-      callWithSource $ int callbacks integer,
+      makeCallback $ int64 callbacks integer,
     formatDictEntry uint16Byte validateValueState $ \callbacks ->
       readUint16 >>= \integer ->
-      callWithSource $ int callbacks integer,
+      makeCallback $ int64 callbacks integer,
     formatDictEntry uint32Byte validateValueState $ \callbacks ->
       readUint32 >>= \integer ->
-      callWithSource $ uint32 callbacks integer,
+      makeCallback $ int64 callbacks integer,
     formatDictEntry uint64Byte validateValueState $ \callbacks ->
       read64 >>= \integer ->
-      callWithSource $ uint64 callbacks integer,
+      makeCallback $ uint64 callbacks integer,
     formatDictEntry int8Byte validateValueState $ \callbacks ->
       readNum 1 (fromByteToInt::Num a => Word8 -> a) >>= \integer ->
-      callWithSource $ int callbacks integer,
+      makeCallback $ int64 callbacks integer,
     formatDictEntry int16Byte validateValueState $ \callbacks ->
       readNum 2 ((\byte ->
           fromIntegral (fromIntegral byte :: Int16))::Num a => Word16 -> a
         ) >>= \integer ->
-      callWithSource $ int callbacks integer,
+      makeCallback $ int64 callbacks integer,
     formatDictEntry int32Byte validateValueState $ \callbacks ->
       readNum 4 ((\byte ->
-          fromIntegral (fromIntegral byte :: Int))::Num a => Word32 -> a
+          fromIntegral (fromIntegral byte :: Int32))::Num a => Word32 -> a
         ) >>= \integer ->
-      callWithSource $ int callbacks integer,
+      makeCallback $ int64 callbacks integer,
     formatDictEntry int64Byte validateValueState $ \callbacks ->
       read64 >>= \integer ->
-      callWithSource $ int64 callbacks integer,
+      makeCallback $ int64 callbacks integer,
     formatDictEntry floatByte validateValueState $ \callbacks ->
       readNum 4 wordToFloat >>= \num ->
-      callWithSource $ float callbacks num,
+      makeCallback $ float callbacks num,
     formatDictEntry doubleByte validateValueState $ \callbacks ->
       readNum 8 wordToDouble >>= \num ->
-      callWithSource $ double callbacks num,
+      makeCallback $ double callbacks num,
     formatDictEntry bin8Byte validateStringState $ \callbacks ->
       readUint8 >>= \length ->
-      (callWithSource $ binStart callbacks length) >>
-      readByteString length (callWithSource . dat callbacks),
+      (makeCallback $ binStart callbacks length) >>
+      readByteString length (makeCallback . dat callbacks),
     formatDictEntry bin16Byte validateStringState $ \callbacks ->
       readUint16 >>= \length ->
-      (callWithSource $ binStart callbacks length) >>
-      readByteString length (callWithSource . dat callbacks),
+      (makeCallback $ binStart callbacks length) >>
+      readByteString length (makeCallback . dat callbacks),
     formatDictEntry bin32Byte validateStringState $ \callbacks ->
       readUint32 >>= \length ->
-      (callWithSource $ binStart callbacks length) >>
-      readByteString length (callWithSource . dat callbacks),
+      (makeCallback $ binStart callbacks length) >>
+      readByteString length (makeCallback . dat callbacks),
     formatDictEntry str8Byte validateStringState $ \callbacks ->
       readUint8 >>= \length ->
-      (callWithSource $ strStart callbacks length) >>
-      readByteString length (callWithSource . dat callbacks),
+      (makeCallback $ strStart callbacks length) >>
+      readByteString length (makeCallback . dat callbacks),
     formatDictEntry str16Byte validateStringState $ \callbacks ->
       readUint16 >>= \length ->
-      (callWithSource $ strStart callbacks length) >>
-      readByteString length (callWithSource . dat callbacks),
+      (makeCallback $ strStart callbacks length) >>
+      readByteString length (makeCallback . dat callbacks),
     formatDictEntry str32Byte validateStringState $ \callbacks ->
       readUint32 >>= \length ->
-      (callWithSource $ strStart callbacks length) >>
-      readByteString length (callWithSource . dat callbacks),
+      (makeCallback $ strStart callbacks length) >>
+      readByteString length (makeCallback . dat callbacks),
     formatDictEntry ns8Byte validateNamespaceState $ \callbacks ->
       readUint8 >>= \length ->
-      (callWithSource $ nsStart callbacks length) >>
-      readByteString length (callWithSource . dat callbacks),
+      (makeCallback $ nsStart callbacks length) >>
+      readByteString length (makeCallback . dat callbacks),
     formatDictEntry ns16Byte validateNamespaceState $ \callbacks ->
       readUint16 >>= \length ->
-      (callWithSource $ nsStart callbacks length) >>
-      readByteString length (callWithSource . dat callbacks),
+      (makeCallback $ nsStart callbacks length) >>
+      readByteString length (makeCallback . dat callbacks),
     formatDictEntry ns32Byte validateNamespaceState $ \callbacks ->
       readUint32 >>= \length ->
-      (callWithSource $ nsStart callbacks length) >>
-      readByteString length (callWithSource . dat callbacks),
+      (makeCallback $ nsStart callbacks length) >>
+      readByteString length (makeCallback . dat callbacks),
     formatDictEntry classNameByte validateClassNameState $
-      \callback -> callWithSource $ className callback,
+      \callback -> makeCallback $ className callback,
     formatDictEntry sequenceByte
       (validateCollectionState SequenceStart) $
-      \callback -> callWithSource $ sequenceD callback,
+      \callback -> makeCallback $ sequenceD callback,
     formatDictEntry dictionaryByte
       (validateCollectionState Dictionary) $
-      \callback -> callWithSource $ dictionary callback,
+      \callback -> makeCallback $ dictionary callback,
     formatDictEntry objectByte
       (validateCollectionState ObjectStart) $
-      \callback -> callWithSource $ object callback
+      \callback -> makeCallback $ object callback
  ]
 
 fixDictEntry byteMask validator startCb = (byteMask, \byte length ->
       callbackAsk $ \callbacks ->
       validator byte $
-        (callWithSource $ startCb callbacks length) >>
-        readByteString length (callWithSource . dat callbacks)
+        (makeCallback $ startCb callbacks length) >>
+        readByteString length (makeCallback . dat callbacks)
     )
 
 fixDict :: DataSource b e => Map.Map Word8 (
@@ -544,4 +544,4 @@ unpackDataT s catchers callbacks = \c ->
     Env catchers callbacks) ( \(_, states) ->
     case unpackState states of
     Root -> c $ source states
-    _ -> programmatic catchers )
+    _ -> flogTheDeveloper catchers (unpackState states) $ source states )

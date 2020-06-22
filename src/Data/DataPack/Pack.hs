@@ -57,43 +57,33 @@ data States d = States {
      destination :: d }
    deriving (Show, Ord, Eq)
 
-type Callback d r = d -> (d -> r) -> r
+type Catch d c = PackState -> d -> c
+
+type Handle d r = Catch d ((d -> r) -> r)
 
 -- exception handlers
 data Catchers e d r = Catchers {
-    stream :: e -> Word32 -> d -> ((Word32, d) -> r) -> r,
-    tooBig :: C.ByteString -> Callback d r,
-    invalidPackType :: PackState -> Callback d r,
-    programmatic :: r }
+    stream :: e -> Word32 -> Catch d (((Word32, d) -> r) -> r),
+    tooBig :: C.ByteString -> Handle d r,
+    invalidPackType :: Handle d r,
+    flogTheDeveloper :: Catch d r }
 
-putDestinationAnd d a = modifyAnd (\states -> states { destination = d }) (const a)
-
-putDestination d = putDestinationAnd d ()
-
-getDestination f = get >>= f . destination
+putDestination d = modify (\states -> states { destination = d })
 
 putState state = modify (\states -> states { packState = state })
 
 getState f = get >>= f . packState
 
-callWithDestination ca = getDestination $ (\r -> stateReaderContT r >>= putDestination) . ca
-
-callInvalidPackTypeHandler = getState $ \state ->
+callInvalidPackTypeHandler = get >>= \s ->
     contAsk $ \catchers ->
-    callWithDestination $ invalidPackType catchers state
-
-callTooBigErrorHandler byteString = contAsk $ \catchers ->
-    callWithDestination $ tooBig catchers byteString
-
-callProgrammaticErrorHandler = contAsk $
-    stateReaderContT . const . programmatic
+    stateReaderContT (invalidPackType catchers (packState s) $ destination s) >>= putDestination
 
 givePack dat =
-  getDestination $ \d ->
-  give dat d (
+  get >>= \s ->
+  give dat (destination s) (
       \e (n, d') ->
         contAsk $ \catchers ->
-        stateReaderContT (stream catchers e n d') >>= \(n', d'') ->
+        stateReaderContT (stream catchers e n (packState s) d') >>= \(n', d'') ->
         putDestination d'' )
     $ \(n, d') -> putDestination d'
 
@@ -182,7 +172,8 @@ packData byteString byte8 byte16 byte32 = let
         packPrefixedBytes byte16 (fromIntegral len::Word16) 2 byteString
       | len <= 0xffffffff ->
         packPrefixedBytes byte32 (fromIntegral len::Word32) 4 byteString
-  _ -> callTooBigErrorHandler byteString
+  _ -> contAsk $ \catchers ->
+      get >>= \s -> (stateReaderContT . tooBig catchers byteString (packState s) $ destination s) >>= putDestination
 
 packText text = packData (encodeUtf8 text) str8Byte str16Byte str32Byte
 
@@ -266,5 +257,5 @@ packDataT d catchers packRoot = \c ->
     \(_, states) ->
       case packState states of
         Root -> c $ destination states
-        _ -> programmatic catchers
+        _ -> flogTheDeveloper catchers (packState states) $ destination states
   )
