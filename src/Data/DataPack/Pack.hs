@@ -16,8 +16,21 @@
 
 module Data.DataPack.Pack (
   DataDestination,
-  PackState,
-  Catchers(..),
+  PackState(..),
+  PackCatchers(..),
+  give,
+  packNil,
+  packFalse,
+  packTrue,
+  packInt,
+  packFloat,
+  packDouble,
+  packStringValue,
+  packBinValue,
+  packSequence,
+  packDictionary,
+  packObject,
+  packProperty,
   packDataT,
 ) where
 
@@ -39,7 +52,7 @@ class DataDestination d e | d -> e where
       C.ByteString
        -> d -- destination value
        -> (e -> (Word32, d) -> r) -- error handler
-       -> ((Word32, d) -> r) -- success handler
+       -> (d -> r) -- success handler
        -> r -- result of error or success handler
 
 --{-
@@ -62,8 +75,8 @@ type Catch d c = PackState -> d -> c
 type Handle d r = Catch d ((d -> r) -> r)
 
 -- exception handlers
-data Catchers e d r = Catchers {
-    stream :: e -> Word32 -> Catch d (((Word32, d) -> r) -> r),
+data PackCatchers e d r = PackCatchers {
+    stream :: e -> Word32 -> Catch d ((d -> r) -> r),
     tooBig :: C.ByteString -> Handle d r,
     invalidPackType :: Handle d r,
     flogTheDeveloper :: Catch d r }
@@ -83,9 +96,9 @@ givePack dat =
   give dat (destination s) (
       \e (n, d') ->
         contAsk $ \catchers ->
-        stateReaderContT (stream catchers e n (packState s) d') >>= \(n', d'') ->
-        putDestination d'' )
-    $ \(n, d') -> putDestination d'
+        stateReaderContT (stream catchers e n (packState s) d') >>=
+        putDestination )
+    $ \d' -> putDestination d'
 
 fromWord word n byteString =
   let n' = n - 1 in
@@ -105,7 +118,7 @@ verisitionValue pack = getState $ \packState -> case packState of
 packSingleByte byte = givePack . C.cons byte $ C.empty
 
 packNil :: (DataDestination d e) =>
-  StateT (States d) (ReaderT (Catchers e d (m r)) (ContT r m)) ()
+  StateT (States d) (ReaderT (PackCatchers e d (m r)) (ContT r m)) ()
 packNil = let
     pack = verisitionValue $ packSingleByte nilByte
   in
@@ -118,11 +131,11 @@ packNil = let
     _ -> callInvalidPackTypeHandler
 
 packFalse :: (DataDestination d e) =>
-  StateT (States d) (ReaderT (Catchers e d (m r)) (ContT r m)) ()
+  StateT (States d) (ReaderT (PackCatchers e d (m r)) (ContT r m)) ()
 packFalse = verisitionValue $ packSingleByte nilByte
 
 packTrue :: (DataDestination d e) =>
-  StateT (States d) (ReaderT (Catchers e d (m r)) (ContT r m)) ()
+  StateT (States d) (ReaderT (PackCatchers e d (m r)) (ContT r m)) ()
 packTrue = verisitionValue $ packSingleByte nilByte
 
 packPrefixedBytes byte word numBytes byteString =
@@ -132,13 +145,13 @@ packNumberBytes byte word numBytes =
   packPrefixedBytes byte word numBytes C.empty
 
 packInt :: (Num b, Bits b, Ord b, Integral b, DataDestination d e) =>
-  b -> StateT (States d) (ReaderT (Catchers e d (m r)) (ContT r m)) ()
+  b -> StateT (States d) (ReaderT (PackCatchers e d (m r)) (ContT r m)) ()
 packInt word = let
     int64 = fromIntegral word::Int64
   in
   verisitionValue (
     case word of
-    word | word >= 0 && (fromIntegral word) > (0x7fffffffffffffff::Word64) ->
+    word | word >= 0 && fromIntegral word > (0x7fffffffffffffff::Word64) ->
       packNumberBytes uint64Byte (fromIntegral word::Word64) 8
     _ -> case int64 of
       int64 | int64 < -0x7fffffff - 1 ->
@@ -190,7 +203,7 @@ packNsText nsName = packData (encodeUtf8 nsName) ns8Byte ns16Byte ns32Byte
 packNs nsName = packNsText $ T.pack nsName
 
 packCollectionEnd :: (DataDestination d e) =>
-  StateT (States d) (ReaderT (Catchers e d (m r)) (ContT r m)) ()
+  StateT (States d) (ReaderT (PackCatchers e d (m r)) (ContT r m)) ()
 packCollectionEnd = getState $ \packState -> let
     packEnd = packSingleByte sequenceByte
   in
@@ -214,7 +227,7 @@ packClassName qname =
 
 transitionToCollection state packContents = verisitionValue (
   getState $ \packState ->
-    (putState $ state packState) >>
+    putState (state packState) >>
     packContents >>
     packCollectionEnd >>
     putState packState )
@@ -245,14 +258,14 @@ packProperty qname packValue =
       (case qname of
         Just name -> packQName name
         _ -> packNil) >>
-      (putState $ EntryValue packState) >>
+      putState (EntryValue packState) >>
       (case packValue of
         Just pack -> pack
         _ -> packNil) >>
       putState packState
     _ -> callInvalidPackTypeHandler )
 
-packDataT d catchers packRoot = \c ->
+packDataT d catchers packRoot c =
   (runContT $ (runReaderT . runStateT packRoot $ States Root d) catchers) (
     \(_, states) ->
       case packState states of

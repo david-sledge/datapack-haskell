@@ -52,7 +52,8 @@ module Data.DataPack.Unpack (
 
     DataSource,
     UnpackState(..),
-    Catchers(..),
+    UnpackCatchers(..),
+    Callback,
     Callbacks(..),
     States(..),
     defaultCallbacks,
@@ -101,7 +102,7 @@ type Handle s c = UnpackState -> s -> c
 type Callback s r = Handle s ((s -> r) -> r)
 
 -- exception handlers
-data Catchers e s r = Catchers {
+data UnpackCatchers e s r = UnpackCatchers {
     stream :: e -> C.ByteString -> Handle s (((C.ByteString, s) -> r) -> r),
     invalidByte :: Word8 -> [(Word8, Word8)] -> Callback s r,
     unusedByte :: Word8 -> Callback s r,
@@ -124,7 +125,7 @@ data Callbacks s r = Callbacks {
     dictionary :: Callback s r,
     object :: Callback s r }
 
-callbk = \_ s f -> f s
+callbk _ s f = f s
 
 callbk' = const callbk
 
@@ -146,7 +147,7 @@ defaultCallbacks = Callbacks {
     object = callbk }
 
 data Env e s r = Env {
-  catchers :: Catchers e s r,
+  catchers :: UnpackCatchers e s r,
   callbacks :: Callbacks s r }
 
 catcherAsk f = contAsk $ f . catchers
@@ -247,7 +248,7 @@ unpackT =
           -- call mapped function
           Just g -> g
           -- unused byte
-          _ -> (catcherAsk $ \catchers ->
+          _ -> catcherAsk (\catchers ->
               makeCallback $ unusedByte catchers byte) >> unpackT
     _ -> orderTheDeveloperFlogged
 
@@ -341,15 +342,15 @@ validateCollectionEndState byte procMore = let
     Object state' -> procMore >> parent state'
     SequenceStart state' -> procMore >> parent state'
     ObjectStart state' -> procMore >> parent state'
-    EntryValue state'' -> (let
+    EntryValue state'' -> let
         extraCall state = callbackAsk $ \callbacks ->
-          (makeCallback $ nil callbacks) >> parent state
+          makeCallback (nil callbacks) >> procMore >> parent state
       in
       case state'' of
       Dictionary state' -> extraCall state'
       Object state' -> extraCall state'
       -- flog the developer!
-      _ -> orderTheDeveloperFlogged >> unpackT )
+      _ -> orderTheDeveloperFlogged >> unpackT
     _ -> callInvalidByteErrorHandler byte (validStateBytes state)
 
 validateStringState byte procMore = let
@@ -476,39 +477,39 @@ formatDict = Map.fromList [
       makeCallback $ double callbacks num,
     formatDictEntry bin8Byte validateStringState $ \callbacks ->
       readUint8 >>= \length ->
-      (makeCallback $ binStart callbacks length) >>
+      makeCallback (binStart callbacks length) >>
       readByteString length (makeCallback . dat callbacks),
     formatDictEntry bin16Byte validateStringState $ \callbacks ->
       readUint16 >>= \length ->
-      (makeCallback $ binStart callbacks length) >>
+      makeCallback (binStart callbacks length) >>
       readByteString length (makeCallback . dat callbacks),
     formatDictEntry bin32Byte validateStringState $ \callbacks ->
       readUint32 >>= \length ->
-      (makeCallback $ binStart callbacks length) >>
+      makeCallback (binStart callbacks length) >>
       readByteString length (makeCallback . dat callbacks),
     formatDictEntry str8Byte validateStringState $ \callbacks ->
       readUint8 >>= \length ->
-      (makeCallback $ strStart callbacks length) >>
+      makeCallback (strStart callbacks length) >>
       readByteString length (makeCallback . dat callbacks),
     formatDictEntry str16Byte validateStringState $ \callbacks ->
       readUint16 >>= \length ->
-      (makeCallback $ strStart callbacks length) >>
+      makeCallback (strStart callbacks length) >>
       readByteString length (makeCallback . dat callbacks),
     formatDictEntry str32Byte validateStringState $ \callbacks ->
       readUint32 >>= \length ->
-      (makeCallback $ strStart callbacks length) >>
+      makeCallback (strStart callbacks length) >>
       readByteString length (makeCallback . dat callbacks),
     formatDictEntry ns8Byte validateNamespaceState $ \callbacks ->
       readUint8 >>= \length ->
-      (makeCallback $ nsStart callbacks length) >>
+      makeCallback (nsStart callbacks length) >>
       readByteString length (makeCallback . dat callbacks),
     formatDictEntry ns16Byte validateNamespaceState $ \callbacks ->
       readUint16 >>= \length ->
-      (makeCallback $ nsStart callbacks length) >>
+      makeCallback (nsStart callbacks length) >>
       readByteString length (makeCallback . dat callbacks),
     formatDictEntry ns32Byte validateNamespaceState $ \callbacks ->
       readUint32 >>= \length ->
-      (makeCallback $ nsStart callbacks length) >>
+      makeCallback (nsStart callbacks length) >>
       readByteString length (makeCallback . dat callbacks),
     formatDictEntry classNameByte validateClassNameState $
       \callback -> makeCallback $ className callback,
@@ -526,7 +527,7 @@ formatDict = Map.fromList [
 fixDictEntry byteMask validator startCb = (byteMask, \byte length ->
       callbackAsk $ \callbacks ->
       validator byte $
-        (makeCallback $ startCb callbacks length) >>
+        makeCallback (startCb callbacks length) >>
         readByteString length (makeCallback . dat callbacks)
     )
 
@@ -539,7 +540,7 @@ fixDict = Map.fromList [
     fixDictEntry fixstrMask validateStringState strStart,
     fixDictEntry fixnsMask validateNamespaceState nsStart ]
 
-unpackDataT s catchers callbacks = \c ->
+unpackDataT s catchers callbacks c =
   (runContT . runReaderT (runStateT unpackT $ States Root s) $
     Env catchers callbacks) ( \(_, states) ->
     case unpackState states of
