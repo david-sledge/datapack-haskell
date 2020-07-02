@@ -56,7 +56,6 @@ module Data.DataPack.Unpack (
     Callback,
     Callbacks(..),
     States(..),
-    defaultCallbacks,
     unpackDataT,
   ) where
 
@@ -124,27 +123,6 @@ data Callbacks s r = Callbacks {
     sequenceD :: Callback s r,
     dictionary :: Callback s r,
     object :: Callback s r }
-
-callbk _ s f = f s
-
-callbk' = const callbk
-
-defaultCallbacks = Callbacks {
-    nil = callbk,
-    collectionEnd = callbk,
-    boolean = callbk',
-    uint64 = callbk',
-    int64 = callbk',
-    float = callbk',
-    double = callbk',
-    binStart = callbk',
-    strStart = callbk',
-    nsStart = callbk',
-    dat = callbk',
-    className = callbk,
-    sequenceD = callbk,
-    dictionary = callbk,
-    object = callbk }
 
 data Env e s r = Env {
   catchers :: UnpackCatchers e s r,

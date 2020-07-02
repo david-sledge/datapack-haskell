@@ -10,6 +10,7 @@ import Data.Word
 import Data.String
 import Data.Int
 import Data.Text.Lazy.Encoding
+import Numeric (showHex)
 import System.Exit (exitFailure)
 
 import Data.DataPack
@@ -107,7 +108,7 @@ passThruUnpackCatchers = let
           unusedByte cs byte u s f,
       U.flogTheDeveloper = U.flogTheDeveloper failUnpackCatchers }
 
-testCase testName bytString catcherStack callbackStack expectedBytesRemaining =
+unpackTestCase testName bytString catcherStack callbackStack expectedBytesRemaining =
   runStateT (
     unpackDataT (ByteStringPos bytString 0) passThruUnpackCatchers passThruCallbacks $
       \s ->
@@ -121,13 +122,15 @@ testCase testName bytString catcherStack callbackStack expectedBytesRemaining =
     (CatchCallStacks catcherStack callbackStack) >>= \((s, passFail), catchCallStacks) ->
       pure (testName, case passFail of
         Just _ -> passFail
-        _ -> case catchStack catchCallStacks of
-          _:_ -> unpackFailMessage U.Root (pos s) $ "Expected " ++ show (length $ catchStack catchCallStacks) ++ " more exceptions for negative testing"
-          _ -> case callStack catchCallStacks of
-            _:_ -> unpackFailMessage U.Root (pos s) "Expected more bytes in the root value."
-            _ -> passFail)
+        _ -> let cs = catchStack catchCallStacks in
+          case cs of
+            _:_ -> unpackFailMessage U.Root (pos s) $ "Expected " ++ show (length cs) ++ " more exception(s) for negative testing"
+            _ -> let cs' = callStack catchCallStacks in
+              case cs' of
+                _:_ -> unpackFailMessage U.Root (pos s) $ "Expected " ++ show (length cs') ++ " callback(s) in the root value."
+                _ -> passFail)
 
-runTests testCases =
+runTests unpackTestCases =
   putStrLn "Running tests...\n" >> let
     (io, (runCount, failCount)) = foldl (
         \(ioAcc, (runCount, failCount)) fullResults ->
@@ -141,7 +144,7 @@ runTests testCases =
           Nothing -> (ioAcc >> putStrLn (prefix "Passed"),
             (runCount', failCount))
           Just f -> (ioAcc >> putStrLn (f prefix), (runCount', failCount + 1))
-      ) (pure (), (0, 0)) testCases
+      ) (pure (), (0, 0)) unpackTestCases
   in
   io >>
   if failCount == 0
@@ -161,326 +164,590 @@ instance DataDestination C.ByteString () where
 packFailMessage p msg = Just $ \f -> f "Failed" ++ ": with state of "
   ++ show p ++ "\x2014" ++ msg
 
-packDestinationFailMessage p msg = pure (Just $ \f -> f "Failed" ++ ": with state of "
-  ++ show p ++ "\x2014" ++ msg)
+packDestinationFailMessage p msg = pure (Just $ \f -> f "Failed"
+  ++ ": with state of " ++ show p ++ "\x2014" ++ msg)
 
-main = runTests [
-    testCase "nil" (C.pack [nilByte]) []
-      [(failCallbacks "nil") {nil = nil passCallbacks} ] 0,
-    testCase "empty content (negative test)" (C.pack [])
+expectNil = (failCallbacks "nil") {nil = nil passCallbacks}
+
+expectBool b = (failCallbacks (show b)) {boolean = assert b}
+
+expectInt n = (failCallbacks "int") {int64 = assert n}
+
+expectUint n = (failCallbacks "uint") {uint64 = assert n}
+
+expectFloat n = (failCallbacks "float") {float = assert n}
+
+expectDouble n = (failCallbacks "double") {double = assert n}
+
+expectBin n = (failCallbacks "binStart") {binStart = assert n}
+
+expectStr n = (failCallbacks "strStart") {strStart = assert n}
+
+expectNs n = (failCallbacks "nsStart") {nsStart = assert n}
+
+expectDat n = (failCallbacks "dat") {dat = assert n}
+
+expectSequence = (failCallbacks "sequenceD") {sequenceD = sequenceD passCallbacks}
+
+expectDictionary = (failCallbacks "dictionary") {dictionary = dictionary passCallbacks}
+
+expectObject = (failCallbacks "object") {object = object passCallbacks}
+
+expectClassName = (failCallbacks "className") {className = className passCallbacks}
+
+expectCollectionEnd = (failCallbacks "collectionEnd") {collectionEnd = collectionEnd passCallbacks}
+
+failPackCatchers = PackCatchers {
+    P.stream = \e _ p _ _ -> packDestinationFailMessage p $ "stream fail " ++ show e,
+    tooBig = \dat p _ _ -> packDestinationFailMessage p $ "too big " ++ show (C.length dat),
+    invalidPackType = \p _ _ -> packDestinationFailMessage p "invalid pack type",
+    P.flogTheDeveloper = \p _ -> packDestinationFailMessage p "Superfail! Flog the developer!"
+  }
+
+showValues d = case C.uncons d of
+  Just (word, sTail) -> showHex word $ ':':showValues sTail
+  _ -> []
+
+packTestCase testName catchers pack expected = (testName, ) <$> packDataT C.empty catchers pack
+  (\d -> pure $ if d == expected
+    then Nothing
+    else packFailMessage P.Root ("expected " ++ showValues expected ++ ". Found " ++ showValues d))
+
+packIntTestCase n = packTestCase ("pack " ++ show n) failPackCatchers (packInt n)
+
+testString = "Cake tootsie roll chocolate bar dragée cupcake carrot cake cotton\
+  \ candy sesame snaps. Cake sweet roll oat cake I love cake oat cake liquorice\
+  \ toffee halvah. Tootsie roll I love jelly fruitcake bear claw candy canes. I\
+  \ love apple pie liquorice. Lemon drops cotton candy jelly tootsie roll jelly\
+  \ caramels candy. Gingerbread I love sugar plum bonbon marshmallow I love \
+  \jelly beans topping pastry. I love candy canes I love oat cake muffin candy \
+  \canes cotton candy I love. Caramels pudding pastry pie sweet sweet I love \
+  \pastry. Oat cake lollipop cake I love soufflé jelly beans. Tiramisu toffee \
+  \oat cake icing pie chocolate bar apple pie. Dragée cookie caramels pastry \
+  \wafer. Gummies I love jelly jelly beans. I love dragée jelly jelly beans. \
+  \Topping ice cream jelly-o biscuit.\n\nSugar plum macaroon liquorice \
+  \chocolate cake chocolate. Lemon drops powder cupcake. Marzipan pastry ice \
+  \cream tiramisu gummies apple pie cheesecake chocolate bar lemon drops. \
+  \Croissant caramels sweet roll jujubes dragée carrot cake. Jujubes jujubes \
+  \candy ice cream I love. Tootsie roll liquorice cheesecake I love I love \
+  \cotton candy sweet lollipop. Tootsie roll carrot cake pudding cake I love I \
+  \love. Biscuit I love dessert gummi bears tootsie roll tart jujubes. Jelly \
+  \marzipan I love marzipan candy oat cake biscuit. Powder wafer oat cake I \
+  \love chocolate bear claw pie croissant. Candy candy soufflé powder biscuit. \
+  \Topping I love I love sesame snaps.\n\nOat cake chocolate cake tiramisu \
+  \danish cake. Pudding gummies marzipan. Gingerbread brownie tiramisu carrot \
+  \cake ice cream I love donut danish. Icing toffee dessert croissant candy \
+  \canes candy jujubes. Cake I love tiramisu tart jelly beans. Soufflé bonbon \
+  \dessert I love icing. Powder chocolate I love apple pie. Croissant apple pie\
+  \ dragée dragée chocolate bar candy canes jujubes oat cake. Dragée \
+  \gingerbread chocolate cake lemon drops gummies biscuit. Marzipan chocolate \
+  \cake bear claw. Carrot cake pudding jujubes icing sugar plum I love chupa \
+  \chups. Ice cream ice cream I love.\n\nJelly beans cupcake dessert bear claw \
+  \candy canes chupa chups gummi bears. Chocolate bar lemon drops toffee candy \
+  \canes gingerbread. Pie toffee chocolate I love powder halvah apple pie. \
+  \Gummies cheesecake apple pie. Marzipan pudding liquorice icing. Tootsie roll\
+  \ cake I love jujubes. I love dessert oat cake sesame snaps biscuit. I love \
+  \chupa chups jelly-o caramels cotton candy marzipan wafer. Powder gummies \
+  \donut bear claw icing jelly beans dessert chocolate bar. Brownie jelly \
+  \toffee pastry cake. Donut biscuit chocolate liquorice I love candy croissant\
+  \ carrot cake caramels. Toffee chupa chups dessert chupa chups chocolate cake\
+  \ macaroon. Cheesecake chupa chups dessert pie. Sesame snaps I love bear claw\
+  \.\n\nCaramels oat cake tart cake biscuit I love cupcake. Croissant lemon \
+  \drops I love I love. Jelly-o sweet roll oat cake I love. Chocolate ice cream\
+  \ tart. Chocolate bar gummies sweet roll I love marshmallow danish chupa \
+  \chups bear claw. Carrot cake I love cheesecake gummi bears bear claw \
+  \cheesecake brownie. Sugar plum cake chupa chups chocolate bar. Lollipop \
+  \sweet roll toffee lemon drops cotton candy candy canes chocolate cake \
+  \chocolate cake jelly beans. I love chocolate I love. Jujubes jelly beans pie\
+  \ candy. Jelly-o jelly-o chocolate cake soufflé macaroon I love dragée \
+  \pudding cake. Lemon drops brownie jelly powder pudding. Jelly jelly-o apple\
+  \ pie. Dragée candy lemon drops gummies sugar plum pastry donut lemon drops\
+  \ croissant."
+
+main = let
+  str2Bin = encodeUtf8 . T.pack
+  fixstr = "fixstr"
+  fixbin = str2Bin fixstr
+  fixlen = C.length fixbin
+  str8 = Prelude.take 32 testString
+  bin8 = str2Bin str8
+  str8again = Prelude.take 128 testString
+  bin8again = str2Bin str8again
+  bin16 = str2Bin testString
+  f bin = if C.length bin <= 0xffff
+    then f $ C.concat [bin, bin]
+    else bin
+  bin32 = f bin16
+  len32 = C.length bin32
+  in
+  runTests [
+    unpackTestCase "nil" (C.pack [nilByte]) []
+      [expectNil] 0,
+    unpackTestCase "empty content (negative test)" (C.pack [])
       [failUnpackCatchers {U.stream = \_ _ _ s _ -> pure (s, Nothing)}] [] 0,
-    testCase "single nil with more data" (C.pack [nilByte, dictionaryByte])
-      [] [(failCallbacks "nil") {nil = nil passCallbacks} ] 1,
-    testCase "unused (negative test)" (C.pack [objectByte + 1, nilByte])
+    unpackTestCase "single nil with more data" (C.pack [nilByte, dictionaryByte])
+      [] [expectNil] 1,
+    unpackTestCase "unused (negative test)" (C.pack [objectByte + 1, nilByte])
       [failUnpackCatchers {unusedByte = \_ _ s f -> f s}]
-      [(failCallbacks "nil") {nil = nil passCallbacks}] 0,
-    testCase "true" (C.pack [trueByte]) []
-      [(failCallbacks "true") {boolean = assert True} ] 0,
-    testCase "false" (C.pack [falseByte, dictionaryByte]) []
-      [(failCallbacks "false") {boolean = assert False} ] 1,
-    testCase "collection end without matching start (negative test)"
+      [expectNil] 0,
+    unpackTestCase "true" (C.pack [trueByte]) []
+      [expectBool True] 0,
+    unpackTestCase "false" (C.pack [falseByte, dictionaryByte]) []
+      [expectBool False] 1,
+    unpackTestCase "collection end without matching start (negative test)"
       (C.pack [collectionEndByte])
       [failUnpackCatchers {invalidByte = \_ _ _ s _ -> pure (s, Nothing)}]
       [] 0,
-    testCase "fixint 63" (C.pack [63]) []
-      [(failCallbacks "int") {int64 = assert 63} ] 0,
-    testCase "fixint -64" (C.pack [fixintMask]) []
-      [(failCallbacks "int") {int64 = assert (-64)} ] 0,
-    testCase "uint8 without data (negative test)" (C.pack [uint8Byte])
+    unpackTestCase "fixint 63" (C.pack [63]) []
+      [expectInt 63] 0,
+    unpackTestCase "fixint -64" (C.pack [fixintMask]) []
+      [expectInt (-64)] 0,
+    unpackTestCase "uint8 without data (negative test)" (C.pack [uint8Byte])
       [failUnpackCatchers {U.stream = \_ _ _ s _ -> pure (s, Nothing)}] [] 0,
-    testCase "uint8" (C.pack [uint8Byte, 0xff]) []
-      [(failCallbacks "uint8") { int64 = assert 255 } ] 0,
-    testCase "uint16" (C.pack [uint16Byte, 0xff, 0xff]) []
-      [(failCallbacks "uint16") {int64 = assert 65535} ] 0,
-    testCase "uint32" (C.pack [uint32Byte, 0xff, 0xff, 0xff, 0xff]) []
-      [(failCallbacks "uint32") {int64 = assert 4294967295}] 0,
-    testCase "uint64"
+    unpackTestCase "uint8" (C.pack [uint8Byte, 0xff]) []
+      [expectInt 255] 0,
+    unpackTestCase "uint16" (C.pack [uint16Byte, 0xff, 0xff]) []
+      [expectInt 65535] 0,
+    unpackTestCase "uint32" (C.pack [uint32Byte, 0xff, 0xff, 0xff, 0xff]) []
+      [expectInt 4294967295] 0,
+    unpackTestCase "uint64"
       (C.pack [uint64Byte, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff]) []
-      [(failCallbacks "uint64") {uint64 = assert 18446744073709551615} ] 0,
-    testCase "int8" (C.pack [int8Byte, 0xff]) []
-      [(failCallbacks "int8") {int64 = assert (-1)} ] 0,
-    testCase "int16" (C.pack [int16Byte, 0xff, 0xff]) []
-      [(failCallbacks "int16") {int64 = assert (-1)} ] 0,
-    testCase "int32" (C.pack [int32Byte, 0xff, 0xff, 0xff, 0xff]) []
-      [(failCallbacks "int32") {int64 = assert (-1)} ] 0,
-    testCase "int64"
+      [expectUint 18446744073709551615] 0,
+    unpackTestCase "int8" (C.pack [int8Byte, 0xff]) []
+      [expectInt (-1)] 0,
+    unpackTestCase "int16" (C.pack [int16Byte, 0xff, 0xff]) []
+      [expectInt (-1)] 0,
+    unpackTestCase "int32" (C.pack [int32Byte, 0xff, 0xff, 0xff, 0xff]) []
+      [expectInt (-1)] 0,
+    unpackTestCase "int64"
       (C.pack [int64Byte, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff]) []
-      [(failCallbacks "int64") {int64 = assert (-1)} ] 0,
-    testCase "float" (C.pack [floatByte, 0x40, 0x28, 0x00, 0x00]) []
-      [(failCallbacks "float") {float = assert 2.625} ] 0,
-    testCase "double"
+      [expectInt (-1)] 0,
+    unpackTestCase "float" (C.pack [floatByte, 0x40, 0x28, 0x00, 0x00]) []
+      [expectFloat 2.625] 0,
+    unpackTestCase "double"
       (C.pack [doubleByte, 0xc0, 0x05, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]) []
-      [(failCallbacks "double") {double = assert (-2.625)} ] 0,
-    testCase "fixbin"
+      [expectDouble (-2.625)] 0,
+    unpackTestCase "fixbin"
       (C.pack
         [fixbinMask .|. 0x1, 0x05, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00])
       [] [
-        (failCallbacks "binStart") {binStart = assert 1},
-        (failCallbacks "dat") {dat = assert (C.pack [0x05])}
+        expectBin 1,
+        expectDat (C.pack [0x05])
       ] 7,
-    testCase "bin8"
+    unpackTestCase "bin8"
       (C.pack [bin8Byte, 0x1, 0x05, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]) []
       [
-        (failCallbacks "binStart") {binStart = assert 1},
-        (failCallbacks "dat") {dat = assert (C.pack [0x05])}
+        expectBin 1,
+        expectDat (C.pack [0x05])
       ] 6,
-    testCase "bin16"
+    unpackTestCase "bin16"
       (C.pack [bin16Byte, 0, 0x1, 0x05, 0x00, 0x00, 0x00, 0x00, 0x00]) []
       [
-        (failCallbacks "binStart") {binStart = assert 1},
-        (failCallbacks "dat") {dat = assert (C.pack [0x05])}
+        expectBin 1,
+        expectDat (C.pack [0x05])
       ] 5,
-    testCase "bin32"
+    unpackTestCase "bin32"
       (C.pack [bin32Byte, 0x00, 0x00, 0, 0x1, 0x05, 0x00, 0x00, 0x00]) []
       [
-        (failCallbacks "binStart") {binStart = assert 1},
-        (failCallbacks "dat") {dat = assert (C.pack [0x05])}
+        expectBin 1,
+        expectDat (C.pack [0x05])
       ] 3,
-    let
-      bStr = encodeUtf8 $ T.pack "fixstr"
-      len = C.length bStr
-    in
-    testCase "fixstr"
-      (C.concat [C.pack [fixstrMask .|. fromIntegral len], bStr]) []
+    unpackTestCase fixstr
+      (C.concat [C.pack [fixstrMask .|. fromIntegral fixlen], fixbin]) []
       [
-        (failCallbacks "strStart") {strStart = assert $ fromIntegral len},
-        (failCallbacks "dat") {dat = assert bStr}
+        expectStr $ fromIntegral fixlen,
+        expectDat fixbin
       ] 0,
     let
-      bStr = encodeUtf8 $ T.pack "str8"
+      bStr = str2Bin "str8"
       len = C.length bStr
     in
-    testCase "str8"
+    unpackTestCase "str8"
       (C.concat [
         C.pack [str8Byte, fromIntegral len], bStr,
         C.pack [0x00, 0x00, 0x00, 0x00, 0x00, 0x00]
       ]) [] [
-        (failCallbacks "strStart") {strStart = assert $ fromIntegral len},
-        (failCallbacks "dat") {dat = assert bStr}
+        expectStr $ fromIntegral len,
+        expectDat bStr
       ] 6,
     let
-      bStr = encodeUtf8 $ T.pack "str16"
+      bStr = str2Bin "str16"
       len = C.length bStr
     in
-    testCase "str16"
+    unpackTestCase "str16"
       (C.concat [C.pack [str16Byte, 0, fromIntegral len], bStr]) []
       [
-        (failCallbacks "strStart") {strStart = assert $ fromIntegral len},
-        (failCallbacks "dat") {dat = assert bStr} ] 0,
+        expectStr $ fromIntegral len,
+        expectDat bStr ] 0,
     let
-      bStr = encodeUtf8 $ T.pack "str32"
+      bStr = str2Bin "str32"
       len = C.length bStr
     in
-    testCase "str32"
+    unpackTestCase "str32"
       (C.concat [C.pack [str32Byte, 0, 0, 0, fromIntegral len], bStr]) []
       [
-        (failCallbacks "strStart") {strStart = assert $ fromIntegral len},
-        (failCallbacks "dat") {dat = assert bStr}
+        expectStr $ fromIntegral len,
+        expectDat bStr
       ] 0,
-    testCase "out of context namespace name (negative test)"
+    unpackTestCase "out of context namespace name (negative test)"
       (C.pack [fixnsMask])
       [failUnpackCatchers {invalidByte = \_ _ _ s _ -> pure (s, Nothing)}]
       [] 0,
-    testCase "class name outside of sequences and objects (negative test)"
+    unpackTestCase "class name outside of sequences and objects (negative test)"
       (C.pack [classNameByte])
       [failUnpackCatchers {invalidByte = \_ _ _ s _ -> pure (s, Nothing)}]
       [] 0,
-    testCase "empty sequence" (C.pack [sequenceByte, collectionEndByte]) []
+    unpackTestCase "empty sequence" (C.pack [sequenceByte, collectionEndByte]) []
       [
-        (failCallbacks "sequenceD") {sequenceD = sequenceD passCallbacks},
-        (failCallbacks "collectionEnd")
-          {collectionEnd = collectionEnd passCallbacks}
+        expectSequence,
+        expectCollectionEnd
       ] 0,
-    let
-      bStr = encodeUtf8 $ T.pack "fixstr"
-      len = C.length bStr
-    in
-    testCase "empty sequence with local class name" (
+    unpackTestCase "empty sequence with local class name" (
       C.concat [
         C.pack [
           sequenceByte, classNameByte,
-          fixstrMask .|. fromIntegral len],
-        bStr,
+          fixstrMask .|. fromIntegral fixlen],
+        fixbin,
         C.pack [collectionEndByte]]) []
       [
-      (failCallbacks "sequenceD") {sequenceD = sequenceD passCallbacks},
-      (failCallbacks "className") {className = className passCallbacks},
-      (failCallbacks "strStart") {strStart = assert $ fromIntegral len},
-      (failCallbacks "dat") {dat = assert bStr},
-      (failCallbacks "collectionEnd")
-        {collectionEnd = collectionEnd passCallbacks}
+      expectSequence,
+      expectClassName,
+      expectStr $ fromIntegral fixlen,
+      expectDat fixbin,
+      expectCollectionEnd
     ] 0,
-    let
-      bStr = encodeUtf8 $ T.pack "fixstr"
-      len = C.length bStr
-    in
-    testCase "empty sequence with namespaced class name" (
+    unpackTestCase "empty sequence with namespaced class name" (
       C.concat [
         C.pack [
           sequenceByte, classNameByte,
-          fixnsMask .|. fromIntegral len],
-        bStr,
-        C.pack [fixstrMask .|. fromIntegral len],
-        bStr,
+          fixnsMask .|. fromIntegral fixlen],
+        fixbin,
+        C.pack [fixstrMask .|. fromIntegral fixlen],
+        fixbin,
         C.pack [collectionEndByte]]) []
     [
-      (failCallbacks "sequenceD") {sequenceD = sequenceD passCallbacks},
-      (failCallbacks "className") {className = className passCallbacks},
-      (failCallbacks "nsStart") {nsStart = assert $ fromIntegral len},
-      (failCallbacks "dat") {dat = assert bStr},
-      (failCallbacks "strStart") {strStart = assert $ fromIntegral len},
-      (failCallbacks "dat") {dat = assert bStr},
-      (failCallbacks "collectionEnd")
-        {collectionEnd = collectionEnd passCallbacks}
+      expectSequence,
+      expectClassName,
+      expectNs $ fromIntegral fixlen,
+      expectDat fixbin,
+      expectStr $ fromIntegral fixlen,
+      expectDat fixbin,
+      expectCollectionEnd
     ] 0,
-    let
-      bStr = encodeUtf8 $ T.pack "fixstr"
-      len = C.length bStr
-    in
-    testCase "sequence" (
+    unpackTestCase "sequence" (
       C.concat [
         C.pack [ sequenceByte, nilByte, trueByte, falseByte,
-            fixstrMask .|. fromIntegral len ],
-        bStr,
+            fixstrMask .|. fromIntegral fixlen ],
+        fixbin,
         C.pack [ collectionEndByte ] ] ) []
     [
-      (failCallbacks "sequenceD") {sequenceD = sequenceD passCallbacks},
-      (failCallbacks "nil") {nil = nil passCallbacks},
-      (failCallbacks "boolean") {boolean = assert True},
-      (failCallbacks "boolean") {boolean = assert False},
-      (failCallbacks "strStart") {strStart = assert $ fromIntegral len},
-      (failCallbacks "dat") {dat = assert bStr},
-      (failCallbacks "collectionEnd") {collectionEnd = collectionEnd passCallbacks}
+      expectSequence,
+      expectNil,
+      expectBool True,
+      expectBool False,
+      expectStr $ fromIntegral fixlen,
+      expectDat fixbin,
+      expectCollectionEnd
     ] 0,
-    testCase "empty dictionary" (
+    unpackTestCase "empty dictionary" (
         C.pack [ dictionaryByte, collectionEndByte ] ) []
       [
-        (failCallbacks "dictionary") {dictionary = dictionary passCallbacks},
-        (failCallbacks "collectionEnd") {collectionEnd = collectionEnd passCallbacks}
+        expectDictionary,
+        expectCollectionEnd
       ] 0,
-    let
-      bStr = encodeUtf8 $ T.pack "fixstr"
-      len = C.length bStr
-    in
-    testCase "dictionary" (
+    unpackTestCase "dictionary" (
       C.concat [
         C.pack [ dictionaryByte, nilByte, trueByte, falseByte,
-            fixstrMask .|. fromIntegral len ],
-        bStr,
+            fixstrMask .|. fromIntegral fixlen ],
+        fixbin,
         C.pack [ collectionEndByte ] ] ) []
       [
-        (failCallbacks "dictionary") {dictionary = dictionary passCallbacks},
-        (failCallbacks "nil") {nil = nil passCallbacks},
-        (failCallbacks "boolean") {boolean = assert True},
-        (failCallbacks "boolean") {boolean = assert False},
-        (failCallbacks "strStart") {strStart = assert $ fromIntegral len},
-        (failCallbacks "dat") {dat = assert bStr},
-        (failCallbacks "collectionEnd") {collectionEnd = collectionEnd passCallbacks}
+        expectDictionary,
+        expectNil,
+        expectBool True,
+        expectBool False,
+        expectStr $ fromIntegral fixlen,
+        expectDat fixbin,
+        expectCollectionEnd
       ] 0,
-    let
-      bStr = encodeUtf8 $ T.pack "fixstr"
-      len = C.length bStr
-    in
-    testCase "dictionary with implied nil entry value" (
+    unpackTestCase "dictionary with implied nil entry value" (
       C.concat [
         C.pack [ dictionaryByte, trueByte, falseByte,
-            fixstrMask .|. fromIntegral len ],
-        bStr,
+            fixstrMask .|. fromIntegral fixlen ],
+        fixbin,
         C.pack [ collectionEndByte ] ] ) []
     [
-      (failCallbacks "dictionary") {dictionary = dictionary passCallbacks},
-      (failCallbacks "boolean") {boolean = assert True},
-      (failCallbacks "boolean") {boolean = assert False},
-      (failCallbacks "strStart") {strStart = assert $ fromIntegral len},
-      (failCallbacks "dat") {dat = assert bStr},
-      (failCallbacks "nil") {nil = nil passCallbacks},
-      (failCallbacks "collectionEnd") {collectionEnd = collectionEnd passCallbacks}
+      expectDictionary,
+      expectBool True,
+      expectBool False,
+      expectStr $ fromIntegral fixlen,
+      expectDat fixbin,
+      expectNil,
+      expectCollectionEnd
     ] 0,
-    let
-      bStr = encodeUtf8 $ T.pack "fixstr"
-      len = C.length bStr
-    in
-    testCase "empty object with local class name" (
+    unpackTestCase "empty object with local class name" (
       C.concat [
         C.pack [
           objectByte, classNameByte,
-          fixstrMask .|. fromIntegral len],
-        bStr,
+          fixstrMask .|. fromIntegral fixlen],
+        fixbin,
         C.pack [collectionEndByte]]) []
     [
-      (failCallbacks "object") {object = object passCallbacks},
-      (failCallbacks "className") {className = className passCallbacks},
-      (failCallbacks "strStart") {strStart = assert $ fromIntegral len},
-      (failCallbacks "dat") {dat = assert bStr},
-      (failCallbacks "collectionEnd")
-        {collectionEnd = collectionEnd passCallbacks}
+      expectObject,
+      expectClassName,
+      expectStr $ fromIntegral fixlen,
+      expectDat fixbin,
+      expectCollectionEnd
     ] 0,
-    let
-      bStr = encodeUtf8 $ T.pack "fixstr"
-      len = C.length bStr
-    in
-    testCase "empty object with namespaced class name" (
+    unpackTestCase "empty object with namespaced class name" (
       C.concat [
         C.pack [
           objectByte, classNameByte,
-          fixnsMask .|. fromIntegral len],
-        bStr,
-        C.pack [fixstrMask .|. fromIntegral len],
-        bStr,
+          fixnsMask .|. fromIntegral fixlen],
+        fixbin,
+        C.pack [fixstrMask .|. fromIntegral fixlen],
+        fixbin,
         C.pack [collectionEndByte]]) []
     [
-      (failCallbacks "object") {object = object passCallbacks},
-      (failCallbacks "className") {className = className passCallbacks},
-      (failCallbacks "nsStart") {nsStart = assert $ fromIntegral len},
-      (failCallbacks "dat") {dat = assert bStr},
-      (failCallbacks "strStart") {strStart = assert $ fromIntegral len},
-      (failCallbacks "dat") {dat = assert bStr},
-      (failCallbacks "collectionEnd")
-        {collectionEnd = collectionEnd passCallbacks}
+      expectObject,
+      expectClassName,
+      expectNs $ fromIntegral fixlen,
+      expectDat fixbin,
+      expectStr $ fromIntegral fixlen,
+      expectDat fixbin,
+      expectCollectionEnd
     ] 0,
-    let
-      bStr = encodeUtf8 $ T.pack "fixstr"
-      len = C.length bStr
-    in
-    testCase "object with namespaced class name" (
+    unpackTestCase "object with namespaced class name" (
       C.concat [
-        C.pack [objectByte, classNameByte, ns8Byte, fromIntegral len],
-        bStr,
-        C.pack [fixstrMask .|. fromIntegral len],
-        bStr,
-        C.pack [nilByte, 0xf0, ns16Byte, 0, fromIntegral len],
-        bStr,
-        C.pack [fixstrMask, trueByte, ns32Byte, 0, 0, 0, fromIntegral len],
-        bStr,
+        C.pack [objectByte, classNameByte, ns8Byte, fromIntegral fixlen],
+        fixbin,
+        C.pack [fixstrMask .|. fromIntegral fixlen],
+        fixbin,
+        C.pack [nilByte, 0xf0, ns16Byte, 0, fromIntegral fixlen],
+        fixbin,
+        C.pack [fixstrMask, trueByte, ns32Byte, 0, 0, 0, fromIntegral fixlen],
+        fixbin,
         C.pack [fixstrMask, falseByte, fixstrMask, collectionEndByte]]) []
     [
-      (failCallbacks "object") {object = object passCallbacks},
-      (failCallbacks "className") {className = className passCallbacks},
-      (failCallbacks "nsStart") {nsStart = assert $ fromIntegral len},
-      (failCallbacks "dat") {dat = assert bStr},
-      (failCallbacks "strStart") {strStart = assert $ fromIntegral len},
-      (failCallbacks "dat") {dat = assert bStr},
-      (failCallbacks "nil") {nil = nil passCallbacks},
-      (failCallbacks "int64") {int64 = assert (-16)},
-      (failCallbacks "nsStart") {nsStart = assert $ fromIntegral len},
-      (failCallbacks "dat") {dat = assert bStr},
-      (failCallbacks "strStart") {strStart = assert 0},
-      (failCallbacks "dat") {dat = assert C.empty},
-      (failCallbacks "true") {boolean = assert True},
-      (failCallbacks "nsStart") {nsStart = assert $ fromIntegral len},
-      (failCallbacks "dat") {dat = assert bStr},
-      (failCallbacks "strStart") {strStart = assert 0},
-      (failCallbacks "dat") {dat = assert C.empty},
-      (failCallbacks "false") {boolean = assert False},
-      (failCallbacks "strStart") {strStart = assert 0},
-      (failCallbacks "dat") {dat = assert C.empty},
-      (failCallbacks "nil") {nil = nil passCallbacks},
-      (failCallbacks "collectionEnd")
-        {collectionEnd = collectionEnd passCallbacks}
+      expectObject,
+      expectClassName,
+      -- namespace name
+      expectNs $ fromIntegral fixlen,
+      expectDat fixbin,
+      -- local name
+      expectStr $ fromIntegral fixlen,
+      expectDat fixbin,
+      -- property name
+      expectNil,
+      -- property value
+      expectInt (-16),
+      -- property name: namespace name
+      expectNs $ fromIntegral fixlen,
+      expectDat fixbin,
+      -- property name: local name
+      expectStr 0,
+      expectDat C.empty,
+      -- property value
+      expectBool True,
+      -- property name: namespace name
+      expectNs $ fromIntegral fixlen,
+      expectDat fixbin,
+      -- property name: local name
+      expectStr 0,
+      expectDat C.empty,
+      -- property value
+      expectBool False,
+      -- property name: local name
+      expectStr 0,
+      expectDat C.empty,
+      -- property value
+      expectNil,
+      expectCollectionEnd
     ] 0,
-    ("pack Nil", ) <$> packDataT C.empty PackCatchers {
-        P.stream = \e _ p d _ -> packDestinationFailMessage p $ "stream fail " ++ show e,
-        tooBig = \dat p d _ -> packDestinationFailMessage p $ "too big " ++ show (C.length dat),
-        invalidPackType = \p d _ -> packDestinationFailMessage p "invalid pack type",
-        P.flogTheDeveloper = \p d -> packDestinationFailMessage p "Superfail! Flog the developer!"
-      } packNil (\d -> pure $ if d == C.pack [nilByte] then Nothing else packFailMessage P.Root ("expected nilByte. Found " ++ show d)) ]
+
+    packTestCase "pack Nil" failPackCatchers packNil $ C.pack [nilByte],
+    packTestCase "pack True" failPackCatchers packTrue $ C.pack [trueByte],
+    packTestCase "pack False" failPackCatchers packFalse $ C.pack [falseByte],
+
+    packIntTestCase (0::Int64) $ C.pack [0],
+    packIntTestCase (63::Word8) $ C.pack [0x3f],
+    packIntTestCase (-64::Int) $ C.pack [fixintMask],
+
+    packIntTestCase (-65::Int) $ C.pack [int8Byte, 0xbf],
+    packIntTestCase (64::Int) $ C.pack [int8Byte, 0x40],
+    packIntTestCase (127::Int) $ C.pack [int8Byte, 0x7f],
+    packIntTestCase (-128::Int) $ C.pack [int8Byte, 0x80],
+
+    packIntTestCase (128::Int) $ C.pack [uint8Byte, 0x80],
+    packIntTestCase (255::Int) $ C.pack [uint8Byte, 0xff],
+
+    packIntTestCase (-129::Int) $ C.pack [int16Byte, 0xff, 0x7f],
+    packIntTestCase (256::Int) $ C.pack [int16Byte, 0x01, 0],
+    packIntTestCase (32767::Int) $ C.pack [int16Byte, 0x7f, 0xff],
+    packIntTestCase (-32768::Int) $ C.pack [int16Byte, 0x80, 0],
+
+    packIntTestCase (32768::Int64) $ C.pack [uint16Byte, 0x80, 0],
+    packIntTestCase (65535::Int) $ C.pack [uint16Byte, 0xff, 0xff],
+
+    packIntTestCase (-32769::Int) $ C.pack [int32Byte, 0xff, 0xff, 0x7f, 0xff],
+    packIntTestCase (65536::Int) $ C.pack [int32Byte, 0, 0x01, 0, 0],
+    packIntTestCase (2147483647::Int) $ C.pack [int32Byte, 0x7f, 0xff, 0xff, 0xff],
+    packIntTestCase (-2147483648::Int) $ C.pack [int32Byte, 0x80, 0, 0, 0],
+
+    packIntTestCase (2147483648::Int64) $ C.pack [uint32Byte, 0x80, 0, 0, 0],
+    packIntTestCase (4294967295::Int64) $ C.pack [uint32Byte, 0xff, 0xff, 0xff, 0xff],
+
+    packIntTestCase (-2147483649::Int64) $ C.pack [int64Byte, 0xff, 0xff, 0xff, 0xff, 0x7f, 0xff, 0xff, 0xff],
+    packIntTestCase (4294967296::Int64) $ C.pack [int64Byte, 0, 0, 0, 0x01, 0, 0, 0, 0],
+    packIntTestCase (9223372036854775807::Int64) $ C.pack [int64Byte, 0x7f, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff],
+    packIntTestCase (-9223372036854775808::Int64) $ C.pack [int64Byte, 0x80, 0, 0, 0, 0, 0, 0, 0],
+
+    packIntTestCase (9223372036854775808::Word64) $ C.pack [uint64Byte, 0x80, 0, 0, 0, 0, 0, 0, 0],
+    packIntTestCase (18446744073709551615::Word64) $ C.pack [uint64Byte, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff],
+
+    packTestCase "pack float" failPackCatchers (packFloat 2.625) $ C.pack [floatByte, 0x40, 0x28, 0x00, 0x00],
+    packTestCase "pack double" failPackCatchers (packDouble (-2.625)) $ C.pack [doubleByte, 0xc0, 0x05, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00],
+
+    packTestCase "pack fixstr" failPackCatchers (packStringValue fixstr) $ C.cons (fixstrMask .|. 6) fixbin,
+    packTestCase "pack str8" failPackCatchers (packStringValue str8) . C.cons str8Byte $ C.cons (fromIntegral $ C.length bin8) bin8,
+    packTestCase "pack str8 again" failPackCatchers (packStringValue str8again) . C.cons str8Byte $ C.cons (fromIntegral $ C.length bin8again) bin8again,
+    packTestCase "pack str16" failPackCatchers (packStringValue testString) . C.cons str16Byte $ C.cons (fromIntegral $ shiftR (C.length bin16) 8) (C.cons (fromIntegral $ C.length bin16) bin16),
+    packTestCase "pack str32" failPackCatchers (packStringValue . T.unpack . decodeUtf8 $ bin32) $ C.cons str32Byte (
+        C.cons (fromIntegral $ shiftR len32 24) (
+          C.cons (fromIntegral $ shiftR len32 16) (
+            C.cons (fromIntegral $ shiftR len32 8) (
+              C.cons (fromIntegral len32) bin32 ) ) ) ),
+
+    packTestCase "pack fixbin" failPackCatchers (packBinValue fixbin) $ C.cons (fixbinMask .|. 6) fixbin,
+    packTestCase "pack bin8" failPackCatchers (packBinValue bin8) . C.cons bin8Byte $ C.cons (fromIntegral $ C.length bin8) bin8,
+    packTestCase "pack bin8 again" failPackCatchers (packBinValue bin8again) . C.cons bin8Byte $ C.cons (fromIntegral $ C.length bin8again) bin8again,
+    packTestCase "pack bin16" failPackCatchers (packBinValue bin16) . C.cons bin16Byte $ C.cons (fromIntegral $ shiftR (C.length bin16) 8) (C.cons (fromIntegral $ C.length bin16) bin16),
+    packTestCase "pack bin32" failPackCatchers (packBinValue bin32) $ C.cons bin32Byte (
+        C.cons (fromIntegral $ shiftR len32 24) (
+          C.cons (fromIntegral $ shiftR len32 16) (
+            C.cons (fromIntegral $ shiftR len32 8) (
+              C.cons (fromIntegral len32) bin32 ) ) ) ),
+
+    packTestCase "pack empty unclased sequence" failPackCatchers (
+        packSequence Nothing (
+            pure ()
+          )
+      ) $ C.pack [sequenceByte, collectionEndByte],
+    packTestCase "pack empty local name clased sequence" failPackCatchers (
+        packSequence (Just (Nothing, "fixns")) (
+            pure ()
+          )
+      ) $ C.pack [
+        sequenceByte, classNameByte, fixstrMask .|. 5, 102, 105, 120, 110, 115,
+        collectionEndByte],
+    packTestCase "pack empty qualified name clased sequence" failPackCatchers (
+        packSequence (Just (Just "fixns", "fixns")) (
+            pure ()
+          )
+      ) $ C.pack [
+        sequenceByte, classNameByte, fixnsMask .|. 5, 102, 105, 120, 110, 115, fixstrMask .|. 5, 102, 105, 120, 110, 115,
+        collectionEndByte],
+
+    packTestCase "pack non-empty unclased sequence" failPackCatchers (
+        packSequence Nothing packNil
+      ) $ C.pack [sequenceByte, nilByte, collectionEndByte],
+    packTestCase "pack non-empty local name clased sequence" failPackCatchers (
+        packSequence (Just (Nothing, "fixns")) packNil
+      ) $ C.pack [
+        sequenceByte, classNameByte, fixstrMask .|. 5, 102, 105, 120, 110, 115,
+          nilByte,
+        collectionEndByte],
+    packTestCase "pack non-empty qualified name clased sequence" failPackCatchers (
+        packSequence (Just (Just "fixns", "fixns")) packNil
+      ) $ C.pack [
+        sequenceByte, classNameByte, fixnsMask .|. 5, 102, 105, 120, 110, 115, fixstrMask .|. 5, 102, 105, 120, 110, 115,
+          nilByte,
+        collectionEndByte],
+
+    packTestCase "pack empty dictionary" failPackCatchers (
+        packDictionary (
+            pure ()
+          )
+      ) $ C.pack [dictionaryByte, collectionEndByte],
+    packTestCase "pack non-empty dictionary" failPackCatchers (
+        packDictionary (
+            -- key
+            packSequence (Just (Just "fixns", "fixns")) packNil >>
+            -- value
+            packNil >>
+            -- key
+            packTrue >>
+            -- value
+            packFalse
+          )
+      ) $ C.pack [
+          dictionaryByte,
+            sequenceByte, classNameByte, fixnsMask .|. 5, 102, 105, 120, 110, 115, fixstrMask .|. 5, 102, 105, 120, 110, 115,
+              nilByte,
+            collectionEndByte,
+            nilByte,
+            trueByte,
+            falseByte,
+          collectionEndByte],
+
+    packTestCase "pack property as root (negative test)" failPackCatchers {invalidPackType = \p d f -> f d} (packProperty Nothing "" packNil) C.empty,
+    packTestCase "pack property in sequence (negative test)" failPackCatchers {invalidPackType = \p d f -> f d} (packSequence Nothing (packProperty Nothing "" packNil)) $ C.pack [sequenceByte, collectionEndByte],
+    packTestCase "pack property in dictionary as key (negative test)" failPackCatchers {invalidPackType = \p d f -> f d} (packDictionary (packProperty Nothing "" packNil)) $ C.pack [dictionaryByte, collectionEndByte],
+    packTestCase "pack property in dictionary as value (negative test)" failPackCatchers {invalidPackType = \p d f -> f d} (packDictionary (packNil >> packProperty Nothing "" packNil)) $ C.pack [dictionaryByte, nilByte, collectionEndByte],
+
+    packTestCase "pack empty unclased object" failPackCatchers (
+        packObject Nothing (pure ())
+      ) $ C.pack [objectByte, collectionEndByte],
+    packTestCase "pack empty local name clased object" failPackCatchers (
+        packObject (Just (Nothing, "fixns")) (pure ())
+      ) $ C.pack [
+        objectByte, classNameByte, fixstrMask .|. 5, 102, 105, 120, 110, 115,
+        collectionEndByte],
+    packTestCase "pack empty qualified name clased object" failPackCatchers (
+        packObject (Just (Just "fixns", "fixns")) (pure ())
+      ) $ C.pack [
+        objectByte, classNameByte, fixnsMask .|. 5, 102, 105, 120, 110, 115, fixstrMask .|. 5, 102, 105, 120, 110, 115,
+        collectionEndByte],
+
+    packTestCase "pack non-empty unclased object" failPackCatchers (
+        packObject Nothing packNil
+      ) $ C.pack [objectByte, nilByte, collectionEndByte],
+    packTestCase "pack non-empty local name clased object" failPackCatchers (
+        packObject (Just (Nothing, "fixns")) packNil
+      ) $ C.pack [
+        objectByte, classNameByte, fixstrMask .|. 5, 102, 105, 120, 110, 115,
+          nilByte,
+        collectionEndByte],
+    packTestCase "pack non-empty qualified name clased object" failPackCatchers (
+        packObject (Just (Just "fixns", "fixns")) packNil
+      ) $ C.pack [
+        objectByte, classNameByte, fixnsMask .|. 5, 102, 105, 120, 110, 115, fixstrMask .|. 5, 102, 105, 120, 110, 115,
+          nilByte,
+        collectionEndByte],
+
+    packTestCase "pack object" failPackCatchers (
+        packObject Nothing (
+            packProperty (Just "fixns") "fixns"
+              packNil >>
+            packFalse
+          )
+      ) $ C.pack [
+        objectByte,
+          fixnsMask .|. 5, 102, 105, 120, 110, 115, fixstrMask .|. 5, 102, 105, 120, 110, 115,
+          nilByte,
+          nilByte,
+          falseByte,
+        collectionEndByte],
+    packTestCase "pack object with implicit nil value" failPackCatchers (
+        packObject Nothing (packProperty (Just "fixns") "fixns" packNil)
+      ) $ C.pack [
+        objectByte, fixnsMask .|. 5, 102, 105, 120, 110, 115, fixstrMask .|. 5, 102, 105, 120, 110, 115,
+        collectionEndByte],
+    packTestCase "pack object with auto nil property name" failPackCatchers (
+        packObject Nothing packTrue
+      ) $ C.pack [
+        objectByte, nilByte, trueByte,
+        collectionEndByte],
+    packTestCase "pack object with auto nil property name and implicit nil value" failPackCatchers (
+        packObject Nothing packNil
+      ) $ C.pack [objectByte, nilByte, collectionEndByte] ]
