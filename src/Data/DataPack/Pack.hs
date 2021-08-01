@@ -16,8 +16,9 @@
 
 module Data.DataPack.Pack (
   DataDestination,
-  PackState(..),
+  PackState(Root),
   PackCatchers(..),
+  States,
   give,
   packNil,
   packFalse,
@@ -25,8 +26,13 @@ module Data.DataPack.Pack (
   packInt,
   packFloat,
   packDouble,
-  packStringValue,
-  packBinValue,
+  packString,
+  packBin,
+  packSequenceStart,
+  packDictionaryStart,
+  packObjectStart,
+  packPropertyName,
+  packCollectionEnd,
   packSequence,
   packDictionary,
   packObject,
@@ -51,7 +57,7 @@ class DataDestination d e | d -> e where
     give ::
       C.ByteString
        -> d -- destination value
-       -> (e -> (Word32, d) -> r) -- error handler
+       -> (e -> Word32 -> d -> r) -- error handler
        -> (d -> r) -- success handler
        -> r -- result of error or success handler
 
@@ -63,219 +69,258 @@ data PackState = Root
   | PostNilEntryValue PackState
   deriving (Ord, Eq, Show)
 
-data States d = States {
-     packState :: PackState,
-     destination :: d }
-   deriving (Show, Ord, Eq)
+data States d u = States {
+    packState :: PackState,
+    destination :: d,
+    userState :: u
+  }
+  deriving (Show, Ord, Eq)
 
 type Catch d c = PackState -> d -> c
 
 type Handle d r = Catch d ((d -> r) -> r)
 
 -- exception handlers
-data PackCatchers e d r = PackCatchers {
-    stream :: e -> Word32 -> Catch d ((d -> r) -> r),
-    tooBig :: C.ByteString -> Handle d r,
-    invalidPackType :: Handle d r,
-    flogTheDeveloper :: Catch d r }
+data PackCatchers e d u r = PackCatchers {
+    stream :: e -> Word32 -> PackState -> d -> u -> (((d, u) -> r) -> r),
+    tooBig :: C.ByteString -> PackState -> d -> u -> (((d, u) -> r) -> r),
+    invalidPackType :: PackState -> d -> u -> (((d, u) -> r) -> r),
+    flogTheDeveloper :: PackState -> d -> u -> r }
 
-putDestination d = modify (\states -> states { destination = d })
+_putDestination d = modify (\states -> states { destination = d })
 
-putState state = modify (\states -> states { packState = state })
+_modifyState f = modify (\states -> states { packState = f (packState states) })
 
-getState f = get >>= f . packState
+_putState state = modify (\states -> states { packState = state })
 
-givePack dat =
+_putUserState state = modify (\states -> states { userState = state })
+
+_givePack dat =
   get >>= \s ->
   give dat (destination s) (
-      \e (n, d') ->
+      \e n d' ->
         contAsk $ \catchers ->
-        stateReaderContT (stream catchers e n (packState s) d') >>=
-        putDestination )
-    $ \d' -> putDestination d'
+        stateReaderContT (stream catchers e n (packState s) d' (userState s)) >>= \(d, u) ->
+        _putDestination d >> _putUserState u)
+    $ \d' -> _putDestination d'
 
-fromWord word n byteString =
+_fromWord word n byteString =
   let n' = n - 1 in
   if n > 0
-  then fromWord (shiftR word 8) n' $
+  then _fromWord (shiftR word 8) n' $
     C.cons (fromIntegral word) byteString
   else byteString
 
--- verify + transition = verisition
-verisitionValue pack = get >>= \s ->
-  let state = packState s in
-  case state of
-  Dictionary _ -> pack >> putState (EntryValue state)
-  EntryValue parentState -> pack >> putState parentState
-  PostNilEntryValue parentState -> packSingleByte nilByte >> case parentState of
-    Dictionary _ -> pack >> putState (EntryValue parentState)
-    Object _ -> packSingleByte nilByte >>
-      putState (EntryValue state) >>
-      pack
-    _ -> contAsk $ \catchers -> stateReaderContT . const . flogTheDeveloper catchers state $ destination s
-  Object _ -> packSingleByte nilByte >>
-    putState (EntryValue state) >>
-    pack
-  _ -> pack
+_orderTheDeveloperFlogged state s = contAsk $
+  \catchers -> stateReaderContT . const . flogTheDeveloper catchers state (destination s) $ userState s
 
-packSingleByte byte = givePack . C.cons byte $ C.empty
+-- verify + transition = verisition
+_verisitionValue pack = _verisitionValueStart (_verisitionValueEnd pack)
+
+_packSingleByte byte = _givePack . C.cons byte $ C.empty
 
 packNil :: (DataDestination d e) =>
-  StateT (States d) (ReaderT (PackCatchers e d (m r)) (ContT r m)) ()
+  StateT (States d u) (ReaderT (PackCatchers e d u (m r)) (ContT r m)) ()
 packNil = get >>= \s ->
   let
-  pack = packSingleByte nilByte
+  pack = _packSingleByte nilByte
   state = packState s
   in
   case state of
-    Dictionary _ -> pack >> putState (EntryValue state)
-    EntryValue parentState -> putState (PostNilEntryValue parentState)
+    Dictionary _ -> pack >> _putState (EntryValue state)
+    EntryValue parentState -> _putState (PostNilEntryValue parentState)
     PostNilEntryValue parentState -> pack >> pack >> case parentState of
-      Dictionary _ -> putState (EntryValue parentState)
-      Object _ -> putState (PostNilEntryValue parentState)
-      _ -> contAsk $ \catchers -> stateReaderContT . const . flogTheDeveloper catchers state $ destination s
+      Dictionary _ -> _putState (EntryValue parentState)
+      Object _ -> _putState (PostNilEntryValue parentState)
+      _ -> _orderTheDeveloperFlogged state s
     Object _ -> pack >>
-      putState (PostNilEntryValue state)
+      _putState (PostNilEntryValue state)
     _ -> pack
 
 packFalse :: (DataDestination d e) =>
-  StateT (States d) (ReaderT (PackCatchers e d (m r)) (ContT r m)) ()
-packFalse = verisitionValue $ packSingleByte falseByte
+  StateT (States d u) (ReaderT (PackCatchers e d u (m r)) (ContT r m)) ()
+packFalse = _verisitionValue $ _packSingleByte falseByte
 
 packTrue :: (DataDestination d e) =>
-  StateT (States d) (ReaderT (PackCatchers e d (m r)) (ContT r m)) ()
-packTrue = verisitionValue $ packSingleByte trueByte
+  StateT (States d u) (ReaderT (PackCatchers e d u (m r)) (ContT r m)) ()
+packTrue = _verisitionValue $ _packSingleByte trueByte
 
-packPrefixedBytes byte word numBytes byteString =
-    givePack . C.cons byte $ fromWord word numBytes byteString
+_packPrefixedBytes byte word numBytes byteString =
+    _givePack . C.cons byte $ _fromWord word numBytes byteString
 
-packNumberBytes byte word numBytes =
-  packPrefixedBytes byte word numBytes C.empty
+_packNumberBytes byte word numBytes =
+  _packPrefixedBytes byte word numBytes C.empty
 
-packInt :: (Num b, Bits b, Ord b, Integral b, DataDestination d e) =>
-  b -> StateT (States d) (ReaderT (PackCatchers e d (m r)) (ContT r m)) ()
-packInt word = verisitionValue (
+packInt word = _verisitionValue (
     case word of
     word | 0 <= word && (0x7fffffffffffffff::Word64) < fromIntegral word ->
-      packNumberBytes uint64Byte (fromIntegral word::Word64) 8
+      _packNumberBytes uint64Byte (fromIntegral word::Word64) 8
     _ -> case fromIntegral word::Int64 of
       int64 | int64 < -0x7fffffff - 1 || 0xffffffff < int64 ->
-        packNumberBytes int64Byte int64 8
+        _packNumberBytes int64Byte int64 8
             | 0x7fffffff < int64 ->
-        packNumberBytes uint32Byte (fromIntegral word::Word32) 4
+        _packNumberBytes uint32Byte (fromIntegral word::Word32) 4
             | int64 < -0x7fff - 1 || 0xffff < int64 ->
-        packNumberBytes int32Byte (fromIntegral word::Int32) 4
+        _packNumberBytes int32Byte (fromIntegral word::Int32) 4
             | 0x7fff < int64 ->
-        packNumberBytes uint16Byte (fromIntegral word::Word16) 2
+        _packNumberBytes uint16Byte (fromIntegral word::Word16) 2
             | int64 < -0x7f - 1 || 0xff < int64 ->
-        packNumberBytes int16Byte (fromIntegral word::Int16) 2
+        _packNumberBytes int16Byte (fromIntegral word::Int16) 2
             | 0x7f < int64 ->
-        packNumberBytes uint8Byte (fromIntegral word::Word8) 1
+        _packNumberBytes uint8Byte (fromIntegral word::Word8) 1
             | int64 < -0x3f - 1 || 0x3f < int64 ->
-        packNumberBytes int8Byte (fromIntegral word::Int8) 1
-      _ -> givePack $ fromWord (fromIntegral word::Int8) 1 C.empty )
+        _packNumberBytes int8Byte (fromIntegral word::Int8) 1
+      _ -> _givePack $ _fromWord (fromIntegral word::Int8) 1 C.empty )
 
-packFloat float = packNumberBytes floatByte (floatToWord float) 4
+packFloat float = _packNumberBytes floatByte (floatToWord float) 4
 
-packDouble double = packNumberBytes doubleByte (doubleToWord double) 8
+packDouble double = _packNumberBytes doubleByte (doubleToWord double) 8
 
-packData byteString fixbyte byte8 byte16 byte32 = let
+_packBinaryData byteString fixbyte byte8 byte16 byte32 = let
     len = C.length byteString
   in
   case len of
   len | len <= 0x1f ->
-        givePack $ C.cons (fixbyte .|. (fromIntegral len::Word8)) byteString
+        _givePack $ C.cons (fixbyte .|. (fromIntegral len::Word8)) byteString
       | len <= 0xff ->
-        packPrefixedBytes byte8 (fromIntegral len::Word8) 1 byteString
+        _packPrefixedBytes byte8 (fromIntegral len::Word8) 1 byteString
       | len <= 0xffff ->
-        packPrefixedBytes byte16 (fromIntegral len::Word16) 2 byteString
+        _packPrefixedBytes byte16 (fromIntegral len::Word16) 2 byteString
       | len <= 0xffffffff ->
-        packPrefixedBytes byte32 (fromIntegral len::Word32) 4 byteString
+        _packPrefixedBytes byte32 (fromIntegral len::Word32) 4 byteString
   _ -> contAsk $ \catchers ->
-      get >>= \s -> (stateReaderContT . tooBig catchers byteString (packState s) $ destination s) >>= putDestination
+      get >>= \s ->
+      (stateReaderContT . tooBig catchers byteString (packState s) (destination s) $ userState s) >>= \(d, u) ->
+      _putDestination d >>
+      _putUserState u
 
-packText text = packData (encodeUtf8 text) fixstrMask str8Byte str16Byte str32Byte
+_packText text = _packBinaryData (encodeUtf8 text) fixstrMask str8Byte str16Byte str32Byte
 
-packString string = packText $ T.pack string
+_packString string = _packText $ T.pack string
 
-packStringValue string = verisitionValue $ packString string
+packString string = _verisitionValue $ _packString string
 
-packBin byteString = packData byteString fixbinMask bin8Byte bin16Byte bin32Byte
+_packBin byteString = _packBinaryData byteString fixbinMask bin8Byte bin16Byte bin32Byte
 
-packBinValue byteString = verisitionValue $ packBin byteString
+packBin byteString = _verisitionValue $ _packBin byteString
 
-packNsText nsName = packData (encodeUtf8 nsName) fixnsMask ns8Byte ns16Byte ns32Byte
+_packNsText nsName = _packBinaryData (encodeUtf8 nsName) fixnsMask ns8Byte ns16Byte ns32Byte
 
-packNs nsName = packNsText $ T.pack nsName
-
-packCollectionEnd :: (DataDestination d e) =>
-  StateT (States d) (ReaderT (PackCatchers e d (m r)) (ContT r m)) ()
-packCollectionEnd = get >>= \s -> let
-    packEnd = packSingleByte collectionEndByte
-    state = packState s
-  in
-  case state of
-    Root -> contAsk $ \catchers -> stateReaderContT . const . flogTheDeveloper catchers state $ destination s
-    _ -> packEnd
-
-packQName nsName localName = let
-    packStr = packString localName
+_packQName nsName localName = let
+    packStr = _packString localName
   in
   case nsName of
-  Just name -> packNs name >> packStr
+  Just name -> _packNsText (T.pack name) >> packStr
   _ -> packStr
 
-packClassName nsName localName =
-  packSingleByte classNameByte >>
-  packQName nsName localName
+_packClassName nsName localName =
+  _packSingleByte classNameByte >>
+  _packQName nsName localName
 
-transitionToCollection state packContents = verisitionValue (
-  getState $ \packState ->
-    putState (state packState) >>
-    packContents >>
-    packCollectionEnd >>
-    putState packState )
+_verisitionValueStart pack = get >>= \s ->
+  let state = packState s in
+  case state of
+  PostNilEntryValue parentState -> _packSingleByte nilByte >> case parentState of
+    Dictionary _ -> _putState parentState >> pack
+    Object _ ->
+      _packSingleByte nilByte >> _putState (EntryValue parentState) >> pack
+    _ -> _orderTheDeveloperFlogged state s
+  Object parentState ->
+    _packSingleByte nilByte >> _putState (EntryValue state) >> pack
+  _ -> pack
 
-packSequence className packContents = let
-    transition = transitionToCollection Sequence packContents
-  in
-  packSingleByte sequenceByte >>
+packSequenceStart className = _verisitionValueStart (
+    _packSingleByte sequenceByte >>
+    case className of
+    Just (nsName, localName) ->
+      _packClassName nsName localName >> _modifyState Sequence
+    _ -> _modifyState Sequence )
+
+packDictionaryStart :: (DataDestination d e) =>
+  StateT (States d u) (ReaderT (PackCatchers e d u (m r)) (ContT r m)) ()
+packDictionaryStart = _verisitionValueStart (
+    _packSingleByte dictionaryByte >>
+    _modifyState Dictionary )
+
+packObjectStart className = _verisitionValueStart (
+  _packSingleByte objectByte >>
   case className of
-  Just (nsName, localName) -> packClassName nsName localName >> transition
-  _ -> transition
+  Just (nsName, localName) ->
+    _packClassName nsName localName >> _modifyState Object
+  _ -> _modifyState Object )
 
-packDictionary packContents = packSingleByte dictionaryByte >>
-  transitionToCollection Dictionary packContents
+_verisitionValueEnd pack =
+  pack >>
+  get >>= \s ->
+    let state = packState s in
+    case state of
+    Root -> pure ()
+    Sequence _ -> pure ()
+    Dictionary _ -> _putState (EntryValue state)
+    EntryValue parentState -> _putState parentState
+    _ -> _orderTheDeveloperFlogged state s
 
-packObject className packContents = let
-    transition = transitionToCollection Object packContents
-  in
-  packSingleByte objectByte >>
-  case className of
-  Just (nsName, localName) -> packClassName nsName localName >> transition
-  _ -> transition
+packCollectionEnd :: (DataDestination d e) =>
+      StateT (States d u) (ReaderT (PackCatchers e d u (m r)) (ContT r m)) ()
+packCollectionEnd = _verisitionValueEnd (
+    _packSingleByte collectionEndByte >>
+    get >>= \s -> let
+      state = packState s
+      flog'em = _orderTheDeveloperFlogged state s
+      verisition parentState = case parentState of
+        Sequence grandParentState -> _putState grandParentState
+        Dictionary grandParentState -> _putState grandParentState
+        Object grandParentState -> _putState grandParentState
+        _ -> flog'em
+    in
+    case state of
+      Root -> flog'em
+      Sequence parentState -> _putState parentState
+      Dictionary parentState -> _putState parentState
+      Object parentState -> _putState parentState
+      EntryValue parentState -> verisition parentState
+      PostNilEntryValue parentState -> verisition parentState )
 
-packProperty nsName localName packValue =
+packPropertyName nsName localName =
   get >>= \s -> let
   state = packState s
   in
   case state of
   Object _ ->
-    packQName nsName localName >>
-    putState (EntryValue state) >>
-    packValue
-  PostNilEntryValue (Object _) ->
-    packSingleByte nilByte >>
-    packQName nsName localName >>
-    putState (EntryValue state) >>
-    packValue
+    _packQName nsName localName >>
+    _putState (EntryValue state)
+  PostNilEntryValue parentState@(Object _) ->
+    _packSingleByte nilByte >>
+    _packQName nsName localName >>
+    _putState (EntryValue parentState)
+  EntryValue (Object _) ->
+    _packSingleByte nilByte >>
+    _packQName nsName localName
   _ -> contAsk $ \catchers ->
-      stateReaderContT (invalidPackType catchers state $ destination s) >>= putDestination
+      stateReaderContT (invalidPackType catchers state (destination s) $ userState s) >>= \(d, u) ->
+      _putDestination d >>
+      _putUserState u
 
-packDataT d catchers packRoot c =
-  (runContT $ (runReaderT . runStateT packRoot $ States Root d) catchers) (
-    \(_, states) ->
-      case packState states of
-        Root -> c $ destination states
-        _ -> flogTheDeveloper catchers (packState states) $ destination states
-  )
+packSequence className packContents = packSequenceStart className >>
+  packContents >> packCollectionEnd
+
+packDictionary packContents = packDictionaryStart >>
+  packContents >> packCollectionEnd
+
+packObject className packContents = packObjectStart className >>
+  packContents >> packCollectionEnd
+
+packProperty nsName localName packValue =
+  packPropertyName nsName localName >> packValue
+
+packDataT d u catchers packRoot g c = let
+    f (_, states) = let
+        d' = destination states
+        s = packState states
+        u' = userState states
+      in
+      case s of
+        Root -> c d' u'
+        _ -> g s d' u' $ \pack d'' u'' -> (runContT $ (runReaderT . runStateT pack $ States s d'' u'') catchers) f
+  in
+  (runContT $ (runReaderT . runStateT packRoot $ States Root d u) catchers) f
