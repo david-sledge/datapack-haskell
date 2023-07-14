@@ -1,8 +1,12 @@
-{-# LANGUAGE FunctionalDependencies #-}
-
+{-# LANGUAGE DerivingStrategies #-}
+{-# LANGUAGE ImportQualifiedPost #-}
+{-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE TupleSections #-}
+{-# OPTIONS_GHC -Wno-missing-kind-signatures #-}
 --------------------------------------------------------------------
 -- |
--- Module    : Data.DataPack.Get
+-- Module    : Data.DataPack.Pack
 -- Copyright : David M. Sledge 2017
 -- License   : BSD3
 --
@@ -10,317 +14,452 @@
 -- Stability :  experimental
 -- Portability: portable
 --
--- DataPack Deserializer using @Data.Binary@
+-- DataPack Serializer using @Data.Binary@
 --
 --------------------------------------------------------------------
 
 module Data.DataPack.Pack (
-  DataDestination,
-  PackState(Root),
-  PackCatchers(..),
-  States,
-  give,
-  packNil,
-  packFalse,
-  packTrue,
-  packInt,
-  packFloat,
-  packDouble,
-  packString,
-  packBin,
-  packSequenceStart,
-  packDictionaryStart,
-  packObjectStart,
-  packPropertyName,
-  packCollectionEnd,
-  packSequence,
-  packDictionary,
-  packObject,
-  packProperty,
-  packDataT,
+  LocalName,
+  NamespaceName,
+  PackError(..),
+  Value,
+
+  pack,
+  pkNil,
+  pkLnBin,
+  pkLnTxt,
+  pkLnStr,
+  pkNsTxt,
+  pkNsStr,
+  pkBin,
+  pkTxt,
+  pkStr,
+  pkInt,
+  pkFloat,
+  pkDouble,
+  pkBool,
+  pkFalse,
+  pkTrue,
+  pkDict,
+  pkSeq,
+  pkUSeq,
+  pkObj,
+  pkUObj,
+  (#.),
+  (##),
+  (#~),
+  (~.),
+  (~#),
+  (~~),
+  (|!),
+  (.!),
+  (#!),
+  (~!),
+  (|/),
+  (./),
+  (#/),
+  (~/),
+  (.:),
+  (#:),
+  (~:),
 ) where
 
-import Control.Monad.Trans.Cont
-import Control.Monad.Trans.Reader
-import Control.Monad.Trans.State
-import Data.Binary.IEEE754
-import Data.Bits
-import qualified Data.ByteString.Lazy as C
-import Data.Int
-import Data.Maybe
-import qualified Data.Text.Lazy as T
-import Data.Text.Lazy.Encoding
-import Data.Word
+import Prelude
+import Data.Binary.IEEE754 ( doubleToWord, floatToWord )
+import Data.Bits ( Bits((.|.), shiftR) )
+import Data.ByteString.Lazy (ByteString)
+import Data.ByteString.Lazy qualified as B
+import Data.ByteString.Lazy.UTF8 (fromString)
+import Data.Int ( Int8, Int16, Int32, Int64 )
+import Data.Target ( DataTarget(..) )
+import Data.Text.Lazy ( Text )
+import Data.Text.Lazy.Encoding ( encodeUtf8 )
+import Data.Word ( Word8, Word16, Word32, Word64 )
 import Data.DataPack
+    ( bin16Byte,
+      bin32Byte,
+      bin8Byte,
+      classNameByte,
+      collectionEndByte,
+      dictionaryByte,
+      doubleByte,
+      falseByte,
+      fixbinMask,
+      fixnsMask,
+      fixstrMask,
+      floatByte,
+      int16Byte,
+      int32Byte,
+      int64Byte,
+      int8Byte,
+      nilByte,
+      ns16Byte,
+      ns32Byte,
+      ns8Byte,
+      objectByte,
+      sequenceByte,
+      str16Byte,
+      str32Byte,
+      str8Byte,
+      trueByte,
+      uint16Byte,
+      uint32Byte,
+      uint64Byte,
+      uint8Byte )
+import Control.Monad.Except (ExceptT, MonadError, runExceptT, throwError)
+import Control.Monad.Trans.Class (lift, MonadTrans)
+import Control.Monad (foldM, (>=>))
 
-class DataDestination d e | d -> e where
-    give ::
-      C.ByteString
-       -> d -- destination value
-       -> (e -> Word32 -> d -> r) -- error handler
-       -> (d -> r) -- success handler
-       -> r -- result of error or success handler
+infix 4 ##, #., #~, ~#, ~., ~~, .:, #:, ~:
+infix 3 |!, .!, #!, ~!, |/, ./, #/, ~/
 
-data PackState = Root
-  | Sequence PackState
-  | Dictionary PackState
-  | Object PackState
-  | EntryValue PackState
-  | PostNilEntryValue PackState
-  deriving (Ord, Eq, Show)
+data PackError e =
+  TooBig ByteString |
+  TargetError e
+  deriving stock (Show, Ord, Eq, Read)
 
-data States d u = States {
-    packState :: PackState,
-    destination :: d,
-    userState :: u
-  }
-  deriving (Show, Ord, Eq)
+_givePack :: (
+    MonadTrans t, Monad m, DataTarget b d (ExceptT e m),
+    MonadError (PackError e, b) (t m)) =>
+  d -> b -> t m b
+_givePack dat t = do
+  res <- lift . runExceptT $ giveData dat t
+  case res of
+    Left e -> throwError (TargetError e, t)
+    Right t' -> pure t'
 
-type Catch d c = PackState -> d -> c
-
-type Handle d r = Catch d ((d -> r) -> r)
-
--- exception handlers
-data PackCatchers e d u r = PackCatchers {
-    stream :: e -> Word32 -> PackState -> d -> u -> (((d, u) -> r) -> r),
-    tooBig :: C.ByteString -> PackState -> d -> u -> (((d, u) -> r) -> r),
-    invalidPackType :: PackState -> d -> u -> (((d, u) -> r) -> r),
-    flogTheDeveloper :: PackState -> d -> u -> r }
-
-_putDestination d = modify (\states -> states { destination = d })
-
-_modifyState f = modify (\states -> states { packState = f (packState states) })
-
-_putState state = modify (\states -> states { packState = state })
-
-_putUserState state = modify (\states -> states { userState = state })
-
-_givePack dat =
-  get >>= \s ->
-  give dat (destination s) (
-      \e n d' ->
-        contAsk $ \catchers ->
-        stateReaderContT (stream catchers e n (packState s) d' (userState s)) >>= \(d, u) ->
-        _putDestination d >> _putUserState u)
-    $ \d' -> _putDestination d'
-
+_fromWord :: (Bits a, Integral a, Ord t, Num t) =>
+  a -> t -> ByteString -> ByteString
 _fromWord word n byteString =
   let n' = n - 1 in
   if n > 0
   then _fromWord (shiftR word 8) n' $
-    C.cons (fromIntegral word) byteString
+    B.cons (fromIntegral word) byteString
   else byteString
 
-_orderTheDeveloperFlogged state s = contAsk $
-  \catchers -> stateReaderContT . const . flogTheDeveloper catchers state (destination s) $ userState s
+_packPrefixedBytes :: (
+    MonadTrans t, DataTarget b ByteString (ExceptT e m),
+    MonadError (PackError e, b) (t m), Bits a1, Integral a1, Num a2, Ord a2,
+    Monad m) =>
+  Word8 -> a1 -> a2 -> ByteString -> b -> t m b
+_packPrefixedBytes byte = (((_givePack . B.cons byte) .) .) . _fromWord
 
--- verify + transition = verisition
-_verisitionValue pack = _verisitionValueStart (_verisitionValueEnd pack)
-
-_packSingleByte byte = _givePack . C.cons byte $ C.empty
-
-packNil :: (DataDestination d e) =>
-  StateT (States d u) (ReaderT (PackCatchers e d u (m r)) (ContT r m)) ()
-packNil = get >>= \s ->
-  let
-  pack = _packSingleByte nilByte
-  state = packState s
-  in
-  case state of
-    Dictionary _ -> pack >> _putState (EntryValue state)
-    EntryValue parentState -> _putState (PostNilEntryValue parentState)
-    PostNilEntryValue parentState -> pack >> pack >> case parentState of
-      Dictionary _ -> _putState (EntryValue parentState)
-      Object _ -> _putState (PostNilEntryValue parentState)
-      _ -> _orderTheDeveloperFlogged state s
-    Object _ -> pack >>
-      _putState (PostNilEntryValue state)
-    _ -> pack
-
-packFalse :: (DataDestination d e) =>
-  StateT (States d u) (ReaderT (PackCatchers e d u (m r)) (ContT r m)) ()
-packFalse = _verisitionValue $ _packSingleByte falseByte
-
-packTrue :: (DataDestination d e) =>
-  StateT (States d u) (ReaderT (PackCatchers e d u (m r)) (ContT r m)) ()
-packTrue = _verisitionValue $ _packSingleByte trueByte
-
-_packPrefixedBytes byte word numBytes byteString =
-    _givePack . C.cons byte $ _fromWord word numBytes byteString
-
-_packNumberBytes byte word numBytes =
-  _packPrefixedBytes byte word numBytes C.empty
-
-packInt word = _verisitionValue (
-    case word of
-    word | 0 <= word && (0x7fffffffffffffff::Word64) < fromIntegral word ->
-      _packNumberBytes uint64Byte (fromIntegral word::Word64) 8
-    _ -> case fromIntegral word::Int64 of
-      int64 | int64 < -0x7fffffff - 1 || 0xffffffff < int64 ->
-        _packNumberBytes int64Byte int64 8
-            | 0x7fffffff < int64 ->
-        _packNumberBytes uint32Byte (fromIntegral word::Word32) 4
-            | int64 < -0x7fff - 1 || 0xffff < int64 ->
-        _packNumberBytes int32Byte (fromIntegral word::Int32) 4
-            | 0x7fff < int64 ->
-        _packNumberBytes uint16Byte (fromIntegral word::Word16) 2
-            | int64 < -0x7f - 1 || 0xff < int64 ->
-        _packNumberBytes int16Byte (fromIntegral word::Int16) 2
-            | 0x7f < int64 ->
-        _packNumberBytes uint8Byte (fromIntegral word::Word8) 1
-            | int64 < -0x3f - 1 || 0x3f < int64 ->
-        _packNumberBytes int8Byte (fromIntegral word::Int8) 1
-      _ -> _givePack $ _fromWord (fromIntegral word::Int8) 1 C.empty )
-
-packFloat float = _packNumberBytes floatByte (floatToWord float) 4
-
-packDouble double = _packNumberBytes doubleByte (doubleToWord double) 8
-
-_packBinaryData byteString fixbyte byte8 byte16 byte32 = let
-    len = C.length byteString
-  in
-  case len of
+_packDataString :: (
+    MonadTrans t, DataTarget b ByteString (ExceptT e m),
+    MonadError (PackError e, b) (t m), Monad m) =>
+  ByteString -> Word8 -> Word8 -> Word8 -> Word8 -> b -> t m b
+_packDataString byteString fixbyte byte8 byte16 byte32 =
+  case B.length byteString of
   len | len <= 0x1f ->
-        _givePack $ C.cons (fixbyte .|. (fromIntegral len::Word8)) byteString
+        _givePack $ B.cons (fixbyte .|. (fromIntegral len::Word8)) byteString
       | len <= 0xff ->
-        _packPrefixedBytes byte8 (fromIntegral len::Word8) 1 byteString
+        _packPrefixedBytes byte8 (fromIntegral len::Word8) (1 :: Int8) byteString
       | len <= 0xffff ->
-        _packPrefixedBytes byte16 (fromIntegral len::Word16) 2 byteString
+        _packPrefixedBytes byte16 (fromIntegral len::Word16) (2 :: Int8) byteString
       | len <= 0xffffffff ->
-        _packPrefixedBytes byte32 (fromIntegral len::Word32) 4 byteString
-  _ -> contAsk $ \catchers ->
-      get >>= \s ->
-      (stateReaderContT . tooBig catchers byteString (packState s) (destination s) $ userState s) >>= \(d, u) ->
-      _putDestination d >>
-      _putUserState u
+        _packPrefixedBytes byte32 (fromIntegral len::Word32) (4 :: Int8) byteString
+  _ -> throwError . (TooBig byteString, )
 
-_packText text = _packBinaryData (encodeUtf8 text) fixstrMask str8Byte str16Byte str32Byte
+_pkBin :: (
+    MonadTrans t, DataTarget b ByteString (ExceptT e m),
+    MonadError (PackError e, b) (t m), Monad m) =>
+  ByteString -> b -> t m b
+_pkBin bin = _packDataString bin fixbinMask bin8Byte bin16Byte bin32Byte
 
-_packString string = _packText $ T.pack string
+_packUtf8 :: (
+    MonadTrans t, DataTarget b ByteString (ExceptT e m),
+    MonadError (PackError e, b) (t m), Monad m) =>
+  ByteString -> b -> t m b
+_packUtf8 bin = _packDataString bin fixstrMask str8Byte str16Byte str32Byte
 
-packString string = _verisitionValue $ _packString string
+_pkTxt :: (
+    MonadTrans t, DataTarget b ByteString (ExceptT e m),
+    MonadError (PackError e, b) (t m), Monad m) =>
+  Text -> b -> t m b
+_pkTxt = _packUtf8 . encodeUtf8
 
-_packBin byteString = _packBinaryData byteString fixbinMask bin8Byte bin16Byte bin32Byte
+_pkStr :: (
+    MonadTrans t, DataTarget b ByteString (ExceptT e m),
+    MonadError (PackError e, b) (t m), Monad m) =>
+  String -> b -> t m b
+_pkStr = _packUtf8 . fromString
 
-packBin byteString = _verisitionValue $ _packBin byteString
+newtype LocalName e m a = LocalName (a -> ExceptT (PackError e, a) m a)
 
-_packNsText nsName = _packBinaryData (encodeUtf8 nsName) fixnsMask ns8Byte ns16Byte ns32Byte
+pkLnBin :: (DataTarget b ByteString (ExceptT e m), Monad m) =>
+  ByteString -> LocalName e m b
+pkLnBin = LocalName . _pkBin
 
-_packQName nsName localName = let
-    packStr = _packString localName
-  in
-  case nsName of
-  Just name -> _packNsText (T.pack name) >> packStr
-  _ -> packStr
+pkLnTxt :: (DataTarget b ByteString (ExceptT e m), Monad m) =>
+  Text -> LocalName e m b
+pkLnTxt = LocalName . _pkTxt
 
-_packClassName nsName localName =
-  _packSingleByte classNameByte >>
-  _packQName nsName localName
+pkLnStr :: (DataTarget b ByteString (ExceptT e m), Monad m) =>
+  String -> LocalName e m b
+pkLnStr = LocalName . _pkStr
 
-_verisitionValueStart pack = get >>= \s ->
-  let state = packState s in
-  case state of
-  PostNilEntryValue parentState -> _packSingleByte nilByte >> case parentState of
-    Dictionary _ -> _putState parentState >> pack
-    Object _ ->
-      _packSingleByte nilByte >> _putState (EntryValue parentState) >> pack
-    _ -> _orderTheDeveloperFlogged state s
-  Object parentState ->
-    _packSingleByte nilByte >> _putState (EntryValue state) >> pack
-  _ -> pack
+_packNs :: (
+    MonadTrans t, DataTarget b ByteString (ExceptT e m),
+    MonadError (PackError e, b) (t m), Monad m) =>
+  ByteString -> b -> t m b
+_packNs bin = _packDataString bin fixnsMask ns8Byte ns16Byte ns32Byte
 
-packSequenceStart className = _verisitionValueStart (
-    _packSingleByte sequenceByte >>
-    case className of
-    Just (nsName, localName) ->
-      _packClassName nsName localName >> _modifyState Sequence
-    _ -> _modifyState Sequence )
+_packNsText :: (
+    MonadTrans t, DataTarget b ByteString (ExceptT e m),
+    MonadError (PackError e, b) (t m), Monad m) =>
+  Text -> b -> t m b
+_packNsText = _packNs . encodeUtf8
 
-packDictionaryStart :: (DataDestination d e) =>
-  StateT (States d u) (ReaderT (PackCatchers e d u (m r)) (ContT r m)) ()
-packDictionaryStart = _verisitionValueStart (
-    _packSingleByte dictionaryByte >>
-    _modifyState Dictionary )
+_packNsString :: (
+    MonadTrans t, DataTarget b ByteString (ExceptT e m),
+    MonadError (PackError e, b) (t m), Monad m) =>
+  String -> b -> t m b
+_packNsString = _packNs . fromString
 
-packObjectStart className = _verisitionValueStart (
-  _packSingleByte objectByte >>
-  case className of
-  Just (nsName, localName) ->
-    _packClassName nsName localName >> _modifyState Object
-  _ -> _modifyState Object )
+newtype NamespaceName e m a = NamespaceName (a -> ExceptT (PackError e, a) m a)
 
-_verisitionValueEnd pack =
-  pack >>
-  get >>= \s ->
-    let state = packState s in
-    case state of
-    Root -> pure ()
-    Sequence _ -> pure ()
-    Dictionary _ -> _putState (EntryValue state)
-    EntryValue parentState -> _putState parentState
-    _ -> _orderTheDeveloperFlogged state s
+pkNsTxt :: (DataTarget b ByteString (ExceptT e m), Monad m) =>
+  Text -> NamespaceName e m b
+pkNsTxt = NamespaceName . _packNsText
 
-packCollectionEnd :: (DataDestination d e) =>
-      StateT (States d u) (ReaderT (PackCatchers e d u (m r)) (ContT r m)) ()
-packCollectionEnd = _verisitionValueEnd (
-    _packSingleByte collectionEndByte >>
-    get >>= \s -> let
-      state = packState s
-      flog'em = _orderTheDeveloperFlogged state s
-      verisition parentState = case parentState of
-        Sequence grandParentState -> _putState grandParentState
-        Dictionary grandParentState -> _putState grandParentState
-        Object grandParentState -> _putState grandParentState
-        _ -> flog'em
-    in
-    case state of
-      Root -> flog'em
-      Sequence parentState -> _putState parentState
-      Dictionary parentState -> _putState parentState
-      Object parentState -> _putState parentState
-      EntryValue parentState -> verisition parentState
-      PostNilEntryValue parentState -> verisition parentState )
+pkNsStr :: (DataTarget b ByteString (ExceptT e m), Monad m) =>
+  String -> NamespaceName e m b
+pkNsStr = NamespaceName . _packNsString
 
-packPropertyName nsName localName =
-  get >>= \s -> let
-  state = packState s
-  in
-  case state of
-  Object _ ->
-    _packQName nsName localName >>
-    _putState (EntryValue state)
-  PostNilEntryValue parentState@(Object _) ->
-    _packSingleByte nilByte >>
-    _packQName nsName localName >>
-    _putState (EntryValue parentState)
-  EntryValue (Object _) ->
-    _packSingleByte nilByte >>
-    _packQName nsName localName
-  _ -> contAsk $ \catchers ->
-      stateReaderContT (invalidPackType catchers state (destination s) $ userState s) >>= \(d, u) ->
-      _putDestination d >>
-      _putUserState u
+(##) :: (
+    DataTarget b1 ByteString (ExceptT e1 m1),
+    DataTarget b2 ByteString (ExceptT e2 m2), Monad m1, Monad m2) =>
+  Text -> Text -> Maybe (Maybe (NamespaceName e1 m1 b1), LocalName e2 m2 b2)
+textNS ## text = Just (Just $ pkNsTxt textNS, pkLnTxt text)
 
-packSequence className packContents = packSequenceStart className >>
-  packContents >> packCollectionEnd
+(#.) :: (
+    DataTarget b1 ByteString (ExceptT e1 m1),
+    DataTarget b2 ByteString (ExceptT e2 m2), Monad m1, Monad m2) =>
+  Text -> ByteString ->
+  Maybe (Maybe (NamespaceName e1 m1 b1), LocalName e2 m2 b2)
+textNS #. bin = Just (Just $ pkNsTxt textNS, pkLnBin bin)
 
-packDictionary packContents = packDictionaryStart >>
-  packContents >> packCollectionEnd
+(#~) :: (
+    DataTarget b1 ByteString (ExceptT e1 m1),
+    DataTarget b2 ByteString (ExceptT e2 m2), Monad m1, Monad m2) =>
+  Text -> String -> Maybe (Maybe (NamespaceName e1 m1 b1), LocalName e2 m2 b2)
+textNS #~ str = Just (Just $ pkNsTxt textNS, pkLnStr str)
 
-packObject className packContents = packObjectStart className >>
-  packContents >> packCollectionEnd
+(~.) :: (
+    DataTarget b1 ByteString (ExceptT e1 m1),
+    DataTarget b2 ByteString (ExceptT e2 m2), Monad m1, Monad m2) =>
+  String -> ByteString ->
+  Maybe (Maybe (NamespaceName e1 m1 b1), LocalName e2 m2 b2)
+strNS ~. bin = Just (Just $ pkNsStr strNS, pkLnBin bin)
 
-packProperty nsName localName packValue =
-  packPropertyName nsName localName >> packValue
+(~#) :: (
+    DataTarget b1 ByteString (ExceptT e1 m1),
+    DataTarget b2 ByteString (ExceptT e2 m2), Monad m1, Monad m2) =>
+  String -> Text -> Maybe (Maybe (NamespaceName e1 m1 b1), LocalName e2 m2 b2)
+strNS ~# text = Just (Just $ pkNsStr strNS, pkLnTxt text)
 
-packDataT d u catchers packRoot g c = let
-    f (_, states) = let
-        d' = destination states
-        s = packState states
-        u' = userState states
-      in
-      case s of
-        Root -> c d' u'
-        _ -> g s d' u' $ \pack d'' u'' -> (runContT $ (runReaderT . runStateT pack $ States s d'' u'') catchers) f
-  in
-  (runContT $ (runReaderT . runStateT packRoot $ States Root d u) catchers) f
+(~~) :: (
+    DataTarget b1 ByteString (ExceptT e1 m1),
+    DataTarget b2 ByteString (ExceptT e2 m2), Monad m1, Monad m2) =>
+  String -> String -> Maybe (Maybe (NamespaceName e1 m1 b1), LocalName e2 m2 b2)
+strNS ~~ str = Just (Just $ pkNsStr strNS, pkLnStr str)
+
+_packNumberBytes :: (
+    MonadTrans t, DataTarget b ByteString (ExceptT e m),
+    MonadError (PackError e, b) (t m), Bits a1, Integral a1, Num a2, Ord a2,
+    Monad m) =>
+  Word8 -> a1 -> a2 -> b -> t m b
+_packNumberBytes byte word numBytes = _packPrefixedBytes byte word numBytes B.empty
+
+newtype Value e m a = Value (a -> ExceptT (PackError e, a) m a)
+
+pkNil :: Maybe a
+pkNil = Nothing
+
+pkBin :: (DataTarget b ByteString (ExceptT e m), Monad m) =>
+  ByteString -> Maybe (Value e m b)
+pkBin = Just . Value . _pkBin
+
+pkTxt :: (DataTarget b ByteString (ExceptT e m), Monad m) =>
+  Text -> Maybe (Value e m b)
+pkTxt = Just . Value . _pkTxt
+
+pkStr :: (DataTarget b ByteString (ExceptT e m), Monad m) =>
+  String -> Maybe (Value e m b)
+pkStr = Just . Value . _pkStr
+
+pkInt :: (Integral a1, Monad m, DataTarget a2 ByteString (ExceptT e m)) =>
+  a1 -> Maybe (Value e m a2)
+pkInt word = Just . Value $
+  case word of
+  _ | 0 <= word && (0x7fffffffffffffff::Word64) < fromIntegral word ->
+    _packNumberBytes uint64Byte (fromIntegral word::Word64) (8 :: Int8)
+  _ -> case fromIntegral word::Int64 of
+    int64 | int64 < -0x7fffffff - 1 || 0xffffffff < int64 ->
+      _packNumberBytes int64Byte int64 (8 :: Int8)
+          | 0x7fffffff < int64 ->
+      _packNumberBytes uint32Byte (fromIntegral word::Word32) (4 :: Int8)
+          | int64 < -0x7fff - 1 || 0xffff < int64 ->
+      _packNumberBytes int32Byte (fromIntegral word::Int32) (4 :: Int8)
+          | 0x7fff < int64 ->
+      _packNumberBytes uint16Byte (fromIntegral word::Word16) (2 :: Int8)
+          | int64 < -0x7f - 1 || 0xff < int64 ->
+      _packNumberBytes int16Byte (fromIntegral word::Int16) (2 :: Int8)
+          | 0x7f < int64 ->
+      _packNumberBytes uint8Byte (fromIntegral word::Word8) (1 :: Int8)
+          | int64 < -0x3f - 1 || 0x3f < int64 ->
+      _packNumberBytes int8Byte (fromIntegral word::Int8) (1 :: Int8)
+    _ -> _givePack $ _fromWord (fromIntegral word::Int8) (1 :: Int8) B.empty
+
+pkFloat :: (DataTarget a ByteString (ExceptT e m), Monad m) =>
+  Float -> Maybe (Value e m a)
+pkFloat float = Just . Value $ _packNumberBytes floatByte
+  (floatToWord float) (4 :: Int8)
+
+pkDouble :: (DataTarget a ByteString (ExceptT e m), Monad m) =>
+  Double -> Maybe (Value e m a)
+pkDouble double = Just . Value $ _packNumberBytes doubleByte
+  (doubleToWord double) (8 :: Int8)
+
+_packSingleByte :: (
+    MonadTrans t, DataTarget b ByteString (ExceptT e m),
+    MonadError (PackError e, b) (t m), Monad m) =>
+  Word8 -> b -> t m b
+_packSingleByte byte = _givePack . B.cons byte $ B.empty
+
+pkBool :: (DataTarget a ByteString (ExceptT e m), Monad m) =>
+  Bool -> Maybe (Value e m a)
+pkBool bool = Just . Value . _packSingleByte $ if bool then trueByte else falseByte
+
+pkFalse, pkTrue :: (DataTarget a ByteString (ExceptT e m), Monad m) =>
+  Maybe (Value e m a)
+pkFalse = pkBool False
+
+pkTrue = pkBool True
+
+_pkNilByte, _packCollectionEnd :: (
+    MonadTrans t, DataTarget b ByteString (ExceptT e m),
+    MonadError (PackError e, b) (t m), Monad m) => b -> t m b
+_pkNilByte = _packSingleByte nilByte
+
+_packCollectionEnd = _packSingleByte collectionEndByte
+
+_packMaybeValue :: (DataTarget a ByteString (ExceptT e m), Monad m) =>
+  Maybe (Value e m a) -> a -> ExceptT (PackError e, a) m a
+_packMaybeValue mValue =
+  case mValue of
+    Just (Value m) -> m
+    _ -> _pkNilByte
+
+pkDict :: (Foldable t, Monad m, DataTarget a ByteString (ExceptT e m)) =>
+  t (Maybe (Value e m a), Maybe (Value e m a)) -> Maybe (Value e m a)
+pkDict entries = Just . Value $
+  _packSingleByte dictionaryByte >=>
+  flip (foldM (\ tAcc (key, value) -> _packMaybeValue key tAcc >>= _packMaybeValue value)) entries >=>
+  _packCollectionEnd
+
+_packQualifiedName :: Monad m =>
+  (Maybe (NamespaceName e m c), LocalName e m c) -> c ->
+  ExceptT (PackError e, c) m c
+_packQualifiedName (mNamespaceName, LocalName localName) =
+  (case mNamespaceName of
+    Just (NamespaceName m) -> m
+    _ -> pure) >=> localName
+
+_packMaybeClassName :: (DataTarget b ByteString (ExceptT e m), Monad m) =>
+  Maybe (Maybe (NamespaceName e m b), LocalName e m b) -> b ->
+  ExceptT (PackError e, b) m b
+_packMaybeClassName mClassName =
+  case mClassName of
+    Nothing -> pure
+    Just mQualfiedName ->
+      _packSingleByte classNameByte >=> _packQualifiedName mQualfiedName
+
+pkSeq :: (Foldable t, Monad m, DataTarget b ByteString (ExceptT e m)) =>
+  Maybe (Maybe (NamespaceName e m b), LocalName e m b) ->
+  t (Maybe (Value e m b)) -> Maybe (Value e m b)
+pkSeq className values = Just . Value $
+  _packSingleByte sequenceByte >=>
+  _packMaybeClassName className >=>
+  flip (foldM $ flip _packMaybeValue) values >=>
+  _packCollectionEnd
+
+(|!) :: (Foldable t, Monad m, DataTarget a ByteString (ExceptT e m)) =>
+  Maybe (Maybe (NamespaceName e m a), LocalName e m a) ->
+  t (Maybe (Value e m a)) -> Maybe (Value e m a)
+(|!) = pkSeq
+
+pkUSeq :: (Foldable t, Monad m, DataTarget a ByteString (ExceptT e m)) =>
+  t (Maybe (Value e m a)) -> Maybe (Value e m a)
+pkUSeq = pkSeq Nothing
+
+(.!) :: (Foldable t, DataTarget a ByteString (ExceptT e m), Monad m) =>
+  ByteString -> t (Maybe (Value e m a)) -> Maybe (Value e m a)
+bin .! values = Just (Nothing, pkLnBin bin) |! values
+
+(#!) :: (Foldable t, DataTarget a ByteString (ExceptT e m), Monad m) =>
+  Text -> t (Maybe (Value e m a)) -> Maybe (Value e m a)
+text #! values = Just (Nothing, pkLnTxt text) |! values
+
+(~!) :: (Foldable t, DataTarget a ByteString (ExceptT e m), Monad m) =>
+  String -> t (Maybe (Value e m a)) -> Maybe (Value e m a)
+str ~! values = Just (Nothing, pkLnStr str) |! values
+
+pkObj :: (Monad m, Foldable t, DataTarget a ByteString (ExceptT e m)) =>
+  Maybe (Maybe (NamespaceName e m a), LocalName e m a) ->
+  t (Maybe (Maybe (NamespaceName e m a), LocalName e m a), Maybe (Value e m a)) ->
+  Maybe (Value e m a)
+pkObj className properties = Just . Value $
+  _packSingleByte objectByte >=>
+  _packMaybeClassName className >=>
+  flip (foldM (\ tAcc (mQualifiedName, value) ->
+    (case mQualifiedName of
+      Nothing -> _packSingleByte nilByte
+      Just mQualfiedName -> _packQualifiedName mQualfiedName) tAcc >>= _packMaybeValue value
+    )) properties >=>
+  _packCollectionEnd
+
+(|/) :: (Monad m, Foldable t, DataTarget a ByteString (ExceptT e m)) =>
+  Maybe (Maybe (NamespaceName e m a), LocalName e m a) ->
+  t (Maybe (Maybe (NamespaceName e m a), LocalName e m a), Maybe (Value e m a)) ->
+  Maybe (Value e m a)
+(|/) = pkObj
+
+pkUObj :: (Monad m, Foldable t, DataTarget a ByteString (ExceptT e m)) =>
+  t (Maybe (Maybe (NamespaceName e m a), LocalName e m a), Maybe (Value e m a)) ->
+  Maybe (Value e m a)
+pkUObj = pkObj Nothing
+
+(./) :: (Foldable t, DataTarget a ByteString (ExceptT e m), Monad m) =>
+  ByteString ->
+  t (Maybe (Maybe (NamespaceName e m a), LocalName e m a), Maybe (Value e m a)) ->
+  Maybe (Value e m a)
+bin ./ values = Just (Nothing, pkLnBin bin) |/ values
+
+(#/) :: (Foldable t, DataTarget a ByteString (ExceptT e m), Monad m) =>
+  Text ->
+  t (Maybe (Maybe (NamespaceName e m a), LocalName e m a), Maybe (Value e m a)) ->
+  Maybe (Value e m a)
+text #/ values = Just (Nothing, pkLnTxt text) |/ values
+
+(~/) :: (Foldable t, DataTarget a ByteString (ExceptT e m), Monad m) =>
+  String ->
+  t (Maybe (Maybe (NamespaceName e m a), LocalName e m a), Maybe (Value e m a)) ->
+  Maybe (Value e m a)
+str ~/ values = Just (Nothing, pkLnStr str) |/ values
+
+(.:) :: (DataTarget b1 ByteString (ExceptT e m), Monad m) =>
+  ByteString -> b2 -> (Maybe (Maybe a, LocalName e m b1), b2)
+bin .: value = (Just (Nothing, pkLnBin bin), value)
+
+(#:) :: (DataTarget b1 ByteString (ExceptT e m), Monad m) =>
+  Text -> b2 -> (Maybe (Maybe a, LocalName e m b1), b2)
+text #: value = (Just (Nothing, pkLnTxt text), value)
+
+(~:) :: (DataTarget b1 ByteString (ExceptT e m), Monad m) =>
+  String -> b2 -> (Maybe (Maybe a, LocalName e m b1), b2)
+str ~: value = (Just (Nothing, pkLnStr str), value)
+
+pack :: (DataTarget a ByteString (ExceptT e m), Monad m) =>
+  Maybe (Value e m a) -> a -> m (Either (PackError e, a) a)
+pack = (runExceptT .) . _packMaybeValue
