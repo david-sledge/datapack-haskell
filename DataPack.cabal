@@ -26,7 +26,6 @@ library
   build-depends:       base >= 4.13.0.0 && < 5,
                         ListLike,
                         bytestring >= 0.10.10.0,
-                        containers >= 0.6.2.1,
                         data-binary-ieee754 >= 0.4.4,
                         mtl >= 2.3.1,
                         text >= 1.2.4.0,
@@ -45,7 +44,7 @@ test-suite DataPack-test
                       -Wno-missing-safe-haskell-mode
   other-modules:     Data.DataPack.UnpackSpec, Data.DataPack.PackSpec
   main-is:             Spec.hs
-  build-depends:       base, transformers >= 0.5.6.2, mtl >= 2.2.2
+  build-depends:       base, mtl >= 2.2.2
                      , DataPack, bytestring >= 0.10.10.0, text >= 1.2.4.0
                      , ListLike
   ghc-options:         -threaded -rtsopts -with-rtsopts=-N

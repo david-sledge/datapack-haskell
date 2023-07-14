@@ -169,12 +169,12 @@ packTests =
             fixstrMask .|. fromIntegral fixlen ],
         fixbin,
         C.pack [ collectionEndByte ] ] ),
-    ("TODO: dictionary with implied nil entry value", packTestCase (pkDict [(pkTrue, pkFalse), (pkStr fixstr, Nothing)])
+    ("dictionary with implied nil entry value", packTestCase (pkDict [(pkTrue, pkFalse), (pkStr fixstr, Nothing)])
       C.empty . Right . LL $ C.concat [
         C.pack [ dictionaryByte, trueByte, falseByte,
             fixstrMask .|. fromIntegral fixlen ],
         fixbin,
-        C.pack [ nilByte, collectionEndByte ] ] ),
+        C.pack [ collectionEndByte ] ] ),
     ("empty object with local class name", packTestCase (fixstr ~/ [])
       C.empty . Right . LL $ C.concat [
         C.pack [
@@ -191,7 +191,7 @@ packTests =
         C.pack [fixstrMask .|. fromIntegral fixlen],
         fixbin,
         C.pack [collectionEndByte]]),
-    ("object with namespaced class name", packTestCase
+    ("object with namespaced class name and implied nil property value", packTestCase
       (fixstr ~~ fixstr |/ [
         (Nothing, pkInt (-16)),
         (fixstr ~~ "", pkTrue),
@@ -207,5 +207,5 @@ packTests =
         C.pack [fixstrMask, trueByte, fixnsMask],
         C.pack [fixstrMask .|. fromIntegral fixlen],
         fixbin,
-        C.pack [falseByte, fixstrMask, nilByte, collectionEndByte]])
+        C.pack [falseByte, fixstrMask, collectionEndByte]])
     ]

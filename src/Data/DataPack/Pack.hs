@@ -353,10 +353,15 @@ _packMaybeValue mValue =
 
 pkDict :: (Foldable t, Monad m, DataTarget a ByteString (ExceptT e m)) =>
   t (Maybe (Value e m a), Maybe (Value e m a)) -> Maybe (Value e m a)
-pkDict entries = Just . Value $
-  _packSingleByte dictionaryByte >=>
-  flip (foldM (\ tAcc (key, value) -> _packMaybeValue key tAcc >>= _packMaybeValue value)) entries >=>
-  _packCollectionEnd
+pkDict entries = Just . Value $ \ t -> do
+  t' <- _packSingleByte dictionaryByte t
+  fst <$> foldM (\ (tAcc, lastWasNil) (key, value) -> do
+    tAcc' <- (if lastWasNil
+      then _pkNilByte
+      else pure) tAcc >>= _packMaybeValue key
+    case value of
+      Just (Value m) -> (, False) <$> m tAcc'
+      Nothing -> pure (tAcc', True)) (t', False) entries >>= _packCollectionEnd
 
 _packQualifiedName :: Monad m =>
   (Maybe (NamespaceName e m c), LocalName e m c) -> c ->
@@ -409,15 +414,18 @@ pkObj :: (Monad m, Foldable t, DataTarget a ByteString (ExceptT e m)) =>
   Maybe (Maybe (NamespaceName e m a), LocalName e m a) ->
   t (Maybe (Maybe (NamespaceName e m a), LocalName e m a), Maybe (Value e m a)) ->
   Maybe (Value e m a)
-pkObj className properties = Just . Value $
-  _packSingleByte objectByte >=>
-  _packMaybeClassName className >=>
-  flip (foldM (\ tAcc (mQualifiedName, value) ->
-    (case mQualifiedName of
+pkObj className properties = Just . Value $ \ t -> do
+  t' <- _packSingleByte objectByte t >>= _packMaybeClassName className
+  fst <$> foldM (\ (tAcc, lastWasNil) (mQualifiedName, value) -> do
+    tAcc' <- (if lastWasNil
+      then _pkNilByte
+      else pure) tAcc >>= (case mQualifiedName of
       Nothing -> _packSingleByte nilByte
-      Just mQualfiedName -> _packQualifiedName mQualfiedName) tAcc >>= _packMaybeValue value
-    )) properties >=>
-  _packCollectionEnd
+      Just mQualfiedName -> _packQualifiedName mQualfiedName)
+    case value of
+      Just (Value m) -> (, False) <$> m tAcc'
+      Nothing -> pure (tAcc', True)
+    ) (t', False) properties >>= _packCollectionEnd
 
 (|/) :: (Monad m, Foldable t, DataTarget a ByteString (ExceptT e m)) =>
   Maybe (Maybe (NamespaceName e m a), LocalName e m a) ->
