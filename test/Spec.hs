@@ -4,11 +4,10 @@
 
 import Control.Monad (foldM)
 import System.Exit (exitFailure)
-import Data.DataPack.UnpackSpec ( UnpackTestResult(Success), unpackTests )
-import Data.DataPack.PackSpec (PackTestResult)
+import qualified Data.DataPack.UnpackSpec as U
 import qualified Data.DataPack.PackSpec as P
 
-runUnpackTests :: (Foldable t, Show p, Show n, Show ll, Show a) => t ([Char], IO (UnpackTestResult n ll p a)) -> IO ()
+runUnpackTests :: (Foldable t, Show a) => t ([Char], IO (Maybe a)) -> IO ()
 runUnpackTests unpackTestCases = do
   putStrLn "Running tests...\n"
   (runCount, failCount) <- foldM (\ (runC, failC) (testName, resultsM) -> do
@@ -18,7 +17,7 @@ runUnpackTests unpackTestCases = do
       ++ testName
     pure (runCount', failC + (
       case results of
-        Success -> 0
+        Nothing -> 0
         _ -> 1))
     ) (0, 0) unpackTestCases
   if failCount == 0
@@ -26,7 +25,7 @@ runUnpackTests unpackTestCases = do
     else putStrLn ('\n':show failCount ++ " out of " ++ show runCount
         ++ " test(s) failed.") >> exitFailure
 
-runPackTests :: (Foldable t, Show ll) => t ([Char], IO (PackTestResult ll)) -> IO ()
+runPackTests :: (Foldable t, Show a) => t ([Char], IO (Maybe a)) -> IO ()
 runPackTests packTestCases = do
   putStrLn "Running tests...\n"
   (runCount, failCount) <- foldM (\ (runC, failC) (testName, resultsM) -> do
@@ -36,7 +35,7 @@ runPackTests packTestCases = do
       ++ testName
     pure (runCount', failC + (
       case results of
-        P.Success -> 0
+        Nothing -> 0
         _ -> 1))
     ) (0, 0) packTestCases
   if failCount == 0
@@ -100,5 +99,5 @@ main = do
   -- unpack it
   -- compare it to the original
 
-  runUnpackTests unpackTests
+  runUnpackTests U.unpackTests
   runPackTests P.packTests

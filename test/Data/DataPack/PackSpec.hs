@@ -4,15 +4,11 @@
 {-# LANGUAGE Rank2Types #-}
 
 module Data.DataPack.PackSpec (
-  PackTestResult(..),
   packTests,
 ) where
 
 import Prelude
-import Data.ListLike (genericLength)
-import Data.Source ( SourcePos(..), DataSourceError(MoreData) )
 import Data.Bits ( Bits((.|.)) )
-import Data.Int (Int64)
 import Data.DataPack.Pack (
   PackError (TooBig),
   Value,
@@ -37,7 +33,7 @@ import Data.DataPack.Pack (
 import Data.ByteString.Lazy qualified as C
 import Data.Text.Lazy qualified as T
 import Data.Text.Lazy.Encoding ( encodeUtf8 )
-import Data.Target (TargetPos(TargetPos), LL(LL), DataTarget)
+import Data.Target (LL(LL), DataTarget)
 import Data.DataPack (
   bin16Byte,
   bin32Byte,
@@ -69,23 +65,20 @@ import Data.DataPack (
   uint8Byte)
 import Control.Monad.Except (ExceptT)
 
-data PackTestResult ll =
-  Success |
-  ResultMismatch ll ll
-  deriving Show
-
-packTestCase :: (Monad m, DataTarget (LL ll) C.ByteString (ExceptT () m), Eq ll) =>
-  Maybe (Value () m (LL ll)) ->
-  ll ->
-  Either (PackError (), LL ll) (LL ll) ->
-  m (PackTestResult (Either (PackError (), LL ll) (LL ll)))
+packTestCase :: (Monad m, DataTarget (LL ll) C.ByteString (ExceptT e m), Eq e, Eq ll) =>
+  Maybe (Value e m (LL ll))
+  -> ll
+  -> Either (PackError e, LL ll) (LL ll)
+  -> m (Maybe
+          (Either (PackError e, LL ll) (LL ll),
+          Either (PackError e, LL ll) (LL ll)))
 packTestCase packInstructions target expected = do
   res <- pack packInstructions $ LL target
   if expected == res
-    then pure Success
-    else pure $ ResultMismatch expected res
+    then pure Nothing
+    else pure $ Just (expected, res)
 
-packTests :: Monad m => [(String, m (PackTestResult (Either (PackError (), LL C.ByteString) (LL C.ByteString))))]
+packTests :: Monad m => [(String, m (Maybe (Either (PackError (), LL C.ByteString) (LL C.ByteString), Either (PackError (), LL C.ByteString) (LL C.ByteString))))]
 packTests =
   let str2Bin = encodeUtf8 . T.pack
       fixstr = "fixstr"

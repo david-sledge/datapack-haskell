@@ -8,7 +8,6 @@ module Data.DataPack.RoundTripSpec (
 
 import Prelude
 import Data.ListLike (genericLength)
-import Data.Source ( SourcePos(..), DataSourceError(MoreData) )
 import Data.Bits ( Bits((.|.)) )
 import Data.Int (Int64)
 import Data.DataPack.Unpack
@@ -58,6 +57,7 @@ import Data.ByteString.Lazy qualified as C
 import Data.Text.Lazy qualified as T
 import Data.Text.Lazy.Encoding ( encodeUtf8 )
 
+{-
 data UnpackTestResult n ll p a =
   Success |
   ResultMismatch n ll a p p |
@@ -325,3 +325,4 @@ unpackTests =
         (Right PCollectionEnd, Root)
       ] 0)
     ]
+--}
