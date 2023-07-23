@@ -116,7 +116,7 @@ import Data.DataPack
       fixMask,
       lenMask )
 import Data.Int (Int8, Int64, Int16, Int32)
-import Data.Source (DataSource, takeFromSource, DataSourceError(MoreData2, Source2))
+import Data.Source (DataSource, takeFromSource, DataSourceError(MoreData, Source))
 import Data.Text.Encoding.Error (lenientDecode)
 import Data.Text.Lazy qualified as TL
 import Data.Text.Lazy.Encoding qualified as EL
@@ -235,10 +235,10 @@ takeUnpack n = do
   case res of
     Left e ->
       case e of
-        MoreData2 src' buff n' -> do
+        MoreData src' buff n' -> do
           put $ mcS {source = src', buffer = buff}
           throwError $ NeedMoreData n'
-        Source2 ex -> throwError $ SourceError ex
+        Source ex -> throwError $ SourceError ex
     Right (d, src') -> state $ const (d, mcS {source = src', buffer = empty})
 
 toWord :: (Bits a, ListLike bc Word8, Num a, Integral n) => n -> bc -> a

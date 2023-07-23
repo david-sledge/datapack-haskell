@@ -35,8 +35,8 @@ class Integral n => DataSource s d n m where
   takeData :: n -> d -> s -> m (d, s)
 
 data DataSourceError e s b n =
-  Source2 e |
-  MoreData2 s b n
+  Source e |
+  MoreData s b n
   deriving stock ( Eq
                  , Ord
                  , Read
@@ -51,9 +51,9 @@ takeFromSource :: (
     DataSource s full b (ExceptT e m)) =>
   b -> full -> s -> m (full, s)
 takeFromSource n d s = do
-  r@(d', s') <- modifyError Source2 (takeData n d s)
+  r@(d', s') <- modifyError Source (takeData n d s)
   if n > genericLength d' - genericLength d
-    then throwError . MoreData2 s' d' $ n - genericLength d' + genericLength d
+    then throwError . MoreData s' d' $ n - genericLength d' + genericLength d
     else pure r
 
 instance Applicative m => DataSource ByteString ByteString Int64 m where
