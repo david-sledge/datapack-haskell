@@ -65,18 +65,20 @@ module Data.DataPack.Unpack (
     PackType(..),
     UnpackError(..),
     UnpackState(..),
+    UnpackT,
     Wrapper,
+    unpackStart,
+    runUnpack,
     unpack,
-    unpackNext,
     unwrap,
     validBytesForState,
     wrapRoot,
   ) where
 
 import Prelude hiding (head, length, take)
-import Control.Monad.Except (ExceptT, MonadError, runExceptT, throwError)
+import Control.Monad.Except (ExceptT (ExceptT), MonadError, runExceptT, throwError)
 import Control.Monad.Reader (ReaderT, runReaderT)
-import Control.Monad.State (MonadState, get, put, runStateT, state)
+import Control.Monad.State (MonadState, get, put, runStateT, state, StateT (StateT))
 import Control.Monad.Trans.Class (lift, MonadTrans)
 import Data.Binary.IEEE754 (wordToDouble, wordToFloat)
 import Data.Bits (Bits, shiftL, xor, (.&.), (.|.))
@@ -204,16 +206,16 @@ data PackType =
   PObject
   deriving stock (Show, Ord, Eq, Read)
 
-data {- Statey -} McStateface a s b = McStateface {
+data Statey a s b = McStateface {
   unpackState :: UnpackState a,
   source :: s,
   buffer :: b
 }
 
-putStateAnd :: MonadState (McStateface a s b) m => UnpackState a -> r -> m r
+putStateAnd :: MonadState (Statey a s b) m => UnpackState a -> r -> m r
 putStateAnd st r = state $ \ mcS -> (r, mcS {unpackState = st})
 
-putState :: MonadState (McStateface a s b) m => UnpackState a -> m ()
+putState :: MonadState (Statey a s b) m => UnpackState a -> m ()
 putState st = putStateAnd st ()
 
 -- interprets byte as a signed 8-bit integer
@@ -221,7 +223,7 @@ fromByteToInt :: (Integral a, Num b) => a -> b
 fromByteToInt byte = fromIntegral (fromIntegral byte :: Int8)
 
 takeUnpack :: (
-    ListLike b (Item b), MonadState (McStateface a s b) (t1 (t2 m)),
+    ListLike b (Item b), MonadState (Statey a s b) (t1 (t2 m)),
     DataSource s b n (ExceptT e (
       ReaderT (UnpackState a) (ExceptT (DataSourceError e s b n) m))),
     MonadTrans t1, MonadTrans t2, Monad m, Monad (t2 m),
@@ -255,7 +257,7 @@ toWord n byteContainer =
 
 readNum :: (
     Item b ~ Word8, ListLike b Word8, MonadTrans t2, MonadTrans t1,
-    MonadState (McStateface a s b) (t1 (t2 m)), Bits b1,
+    MonadState (Statey a s b) (t1 (t2 m)), Bits b1,
     DataSource s b n (ExceptT e (
       ReaderT (UnpackState a) (ExceptT (DataSourceError e s b n) m))),
     MonadError (UnpackError e n) (t1 (t2 m)), Num b1, Monad m,
@@ -265,7 +267,7 @@ readNum n f = f . toWord n <$> takeUnpack n
 
 readUint8, readUint16, readUint32, read64 :: (
     Item b ~ Word8, ListLike b Word8, MonadTrans t2, MonadTrans t1,
-    MonadState (McStateface a s b) (t1 (t2 m)),
+    MonadState (Statey a s b) (t1 (t2 m)),
     DataSource s b n (ExceptT e (
       ReaderT (UnpackState a) (ExceptT (DataSourceError e s b n) m))),
     MonadError (UnpackError e n) (t1 (t2 m)), Num b1, Monad m,
@@ -318,7 +320,7 @@ unpackData :: (
     DataSource s BL.ByteString n (ExceptT e (ReaderT (UnpackState n) (ExceptT (DataSourceError e s BL.ByteString n) m))),
     MonadError (UnpackError e n) (t1 (t2 m)),
     MonadTrans t2, MonadTrans t1,
-    MonadState (McStateface n s BL.ByteString) (t1 (t2 m)), Monad m, Monad (t2 m)) =>
+    MonadState (Statey n s BL.ByteString) (t1 (t2 m)), Monad m, Monad (t2 m)) =>
   t1 (t2 m) PackType
 unpackData = do
   mcS <- get
@@ -583,25 +585,34 @@ newtype Wrapper a = Wrapper (UnpackState a)
 unwrap :: Wrapper a -> UnpackState a
 unwrap (Wrapper s) = s
 
-unpackNext :: (Monad m,
+runUnpack :: (Monad m,
     DataSource s BL.ByteString n (ExceptT e (ReaderT
       (UnpackState n)
       (ExceptT (DataSourceError e s BL.ByteString n) m)))) =>
   (Wrapper n, s, BL.ByteString) -> m (Either (UnpackError e n) PackType,
     (Wrapper n, s, BL.ByteString))
-unpackNext (Wrapper st, src, buff) = do
+runUnpack (Wrapper st, src, buff) = do
   (res, mcS) <- runStateT (runExceptT unpackData) $ McStateface st src buff
   pure (res, (Wrapper $ unpackState mcS, source mcS, buffer mcS))
+
+type UnpackT e n c s m = ExceptT (UnpackError e n) (StateT (Wrapper n, s, BL.ByteString) m) PackType
+
+unpack :: (Monad m,
+    DataSource s BL.ByteString n (ExceptT e (ReaderT
+      (UnpackState n)
+      (ExceptT (DataSourceError e s BL.ByteString n) m)))) =>
+  UnpackT e n c s m
+unpack = ExceptT $ StateT runUnpack
 
 wrapRoot :: Wrapper a
 wrapRoot = Wrapper Root
 
-unpack :: (
+unpackStart :: (
     DataSource s BL.ByteString n (ExceptT e (ReaderT
       (UnpackState n)
       (ExceptT (DataSourceError e s BL.ByteString n) m))),
     Monad m) =>
   s -> m (Either (UnpackError e n) PackType,
     (Wrapper n, s, BL.ByteString))
-unpack src = unpackNext (wrapRoot, src, empty)
+unpackStart src = runUnpack (wrapRoot, src, empty)
 --}

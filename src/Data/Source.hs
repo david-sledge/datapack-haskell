@@ -47,9 +47,9 @@ data DataSourceError e s b n =
                  )
 
 takeFromSource :: (
-    ListLike full (Item full), MonadError (DataSourceError e s full b) m,
-    DataSource s full b (ExceptT e m)) =>
-  b -> full -> s -> m (full, s)
+    ListLike full (Item full), MonadError (DataSourceError e s full n) m,
+    DataSource s full n (ExceptT e m)) =>
+  n -> full -> s -> m (full, s)
 takeFromSource n d s = do
   r@(d', s') <- modifyError Source (takeData n d s)
   if n > genericLength d' - genericLength d

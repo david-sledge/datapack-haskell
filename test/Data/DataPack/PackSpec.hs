@@ -12,7 +12,7 @@ import Data.Bits ( Bits((.|.)) )
 import Data.DataPack.Pack (
   PackError (TooBig),
   Value,
-  pack,
+  runPack,
   pkBin,
   pkDict,
   pkDouble,
@@ -66,14 +66,14 @@ import Data.DataPack (
 import Control.Monad.Except (ExceptT)
 
 packTestCase :: (Monad m, DataTarget ll C.ByteString (ExceptT e m), Eq e, Eq ll) =>
-  Maybe (Value e m ll)
+  Maybe (Value (ExceptT (PackError e, ll) m) ll)
   -> ll
   -> Either (PackError e, ll) ll
   -> m (Maybe
           (Either (PackError e, ll) ll,
           Either (PackError e, ll) ll))
 packTestCase packInstructions target expected = do
-  res <- pack packInstructions target
+  res <- runPack packInstructions target
   if expected == res
     then pure Nothing
     else pure $ Just (expected, res)

@@ -14,12 +14,12 @@ import Data.DataPack.Unpack
     ( UnpackState(Root, Number, SequenceStart, Sequence, Dictionary,
                   ObjectStart, ClassName, LocalName, EntryValue, EarlyCollectionEnd,
                   Object),
-      UnpackError(InvalidByte, NeedMoreData, UnusedByte, SourceError),
+      UnpackError(InvalidByte, NeedMoreData, UnusedByte),
       PackType(..),
       NumberType(NUInt),
       BitSize(Bit64, Bit8, Bit32),
       unwrap,
-      unpackNext,
+      runUnpack,
       wrapRoot,
       nilByte,
       dictionaryByte,
@@ -70,7 +70,7 @@ unpackTestCase bytString expectStack =
   let f n src wSt buff expectStk = do
         case expectStk of
           expectRes : stack -> do
-            (res, (wSt', src', buff')) <- unpackNext (wSt, src, buff)
+            (res, (wSt', src', buff')) <- runUnpack (wSt, src, buff)
             let st' = unwrap wSt'
             if expectRes == (res, (st', src', buff'))
             then f (n + 1) src' wSt' buff' stack
@@ -79,7 +79,7 @@ unpackTestCase bytString expectStack =
   in
   f 0 bytString wrapRoot C.empty expectStack
 
-unpackTests :: Monad m =>
+unpackTests :: (Monad m) =>
   [(String, m (Maybe
           ((Either (UnpackError () Int64) PackType,
             (UnpackState Int64, C.ByteString, C.ByteString)),
@@ -91,7 +91,7 @@ unpackTests =
       fixbin = str2Bin fixstr
       fixlen = C.length fixbin
   in [
-    ("nil" , unpackTestCase (C.pack [nilByte]) [(Right PNil, (Root, C.empty, C.empty))]),
+    ("nil", unpackTestCase (C.pack [nilByte]) [(Right PNil, (Root, C.empty, C.empty))]),
     ("empty content (negative test)", unpackTestCase (C.pack []) [(Left $ NeedMoreData 1, (Root, C.empty, C.empty))]),
     ("single nil with more data", unpackTestCase (C.pack [nilByte, dictionaryByte]) [(Right PNil, (Root, C.pack [dictionaryByte], C.empty))]),
     ("unused (negative test)", unpackTestCase (C.pack [objectByte + 1, nilByte]) [(Left . UnusedByte $ objectByte + 1, (Root, C.pack [nilByte], C.empty))]),

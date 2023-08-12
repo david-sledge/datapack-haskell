@@ -4,11 +4,16 @@
 
 import Control.Monad (foldM)
 import System.Exit (exitFailure)
+import Data.DataPack.RoundTripSpec (packUnpackTests)
 import qualified Data.DataPack.UnpackSpec as U
 import qualified Data.DataPack.PackSpec as P
+import qualified Data.ByteString.Lazy as C
+import Data.DataPack.Unpack (PackType, UnpackError, UnpackState)
+import Data.DataPack.Pack (PackError)
+import Data.Int (Int64)
 
-runUnpackTests :: (Foldable t, Show a) => t ([Char], IO (Maybe a)) -> IO ()
-runUnpackTests unpackTestCases = do
+runTests :: (Foldable t, Show a) => t ([Char], IO (Maybe a)) -> IO ()
+runTests testCases = do
   putStrLn "Running tests...\n"
   (runCount, failCount) <- foldM (\ (runC, failC) (testName, resultsM) -> do
     results <- resultsM
@@ -19,25 +24,7 @@ runUnpackTests unpackTestCases = do
       case results of
         Nothing -> 0
         _ -> 1))
-    ) (0, 0) unpackTestCases
-  if failCount == 0
-    then putStrLn $ "\nSuccess! All " ++ show runCount ++ " test(s) passed."
-    else putStrLn ('\n':show failCount ++ " out of " ++ show runCount
-        ++ " test(s) failed.") >> exitFailure
-
-runPackTests :: (Foldable t, Show a) => t ([Char], IO (Maybe a)) -> IO ()
-runPackTests packTestCases = do
-  putStrLn "Running tests...\n"
-  (runCount, failCount) <- foldM (\ (runC, failC) (testName, resultsM) -> do
-    results <- resultsM
-    let runCount' = runC + 1
-    putStrLn $ '\t':show runCount' ++ ") " ++ show results ++ " "
-      ++ testName
-    pure (runCount', failC + (
-      case results of
-        Nothing -> 0
-        _ -> 1))
-    ) (0, 0) packTestCases
+    ) (0, 0) testCases
   if failCount == 0
     then putStrLn $ "\nSuccess! All " ++ show runCount ++ " test(s) passed."
     else putStrLn ('\n':show failCount ++ " out of " ++ show runCount
@@ -99,5 +86,16 @@ main = do
   -- unpack it
   -- compare it to the original
 
-  runUnpackTests U.unpackTests
-  runPackTests P.packTests
+  runTests (U.unpackTests :: [(String, IO (Maybe
+          ((Either (UnpackError () Int64) PackType,
+            (UnpackState Int64, C.ByteString, C.ByteString)),
+          (Either (UnpackError () Int64) PackType,
+            (UnpackState Int64, C.ByteString, C.ByteString)))))])
+  runTests P.packTests
+  runTests (packUnpackTests :: [(String, IO (Maybe
+          (Either
+              (PackError (), C.ByteString)
+              ((Either (UnpackError () Int64) PackType,
+                (UnpackState Int64, C.ByteString, C.ByteString)),
+              (Either (UnpackError () Int64) PackType,
+                (UnpackState Int64, C.ByteString, C.ByteString))))))])
